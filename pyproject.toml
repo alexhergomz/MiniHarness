@@ -1,0 +1,38 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "miniharness"
+version = "0.1.0"
+description = "A minimal local-first coding agent harness"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+
+# The agent core — loop, provider, tools, context — imports nothing outside the
+# stdlib, so it runs on any bare Python 3.10+ box with no package manager. Both
+# entries here are for the interactive REPL only:
+#   rich           — REPL rendering
+#   prompt_toolkit — line editing, history, ESC-to-abort
+dependencies = [
+    "rich>=13.0",
+    "prompt_toolkit>=3.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "ruff>=0.6"]
+
+[project.scripts]
+miniharness = "miniharness.__main__:main"
+mh = "miniharness.__main__:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["miniharness"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
