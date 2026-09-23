@@ -190,6 +190,88 @@ def print_change(path: str, before: str | None, after: str, config: dict,
         console.print(f"  {loud}", style="bold red", markup=False, highlight=False)
 
 
+def choose(question: str, options: list[str], cancel: int) -> int:
+    """A small menu: arrows or a number to pick, Enter to confirm, Esc for
+    `cancel`. Returns the chosen index.
+
+    The old prompt was the text `[y]es / [n]o / [a]lways` — which Rich read as
+    three style tags and swallowed, so it rendered as "es / o / lways" with no
+    way to tell what to type.
+    """
+    import sys as _sys
+    if not (_sys.stdin.isatty() and _sys.stdout.isatty()):
+        return _choose_by_number(question, options, cancel)
+    try:
+        import termios, tty, select
+    except ImportError:                              # Windows
+        return _choose_by_number(question, options, cancel)
+
+    out = _sys.stdout
+    current = 0
+
+    def draw(first: bool) -> None:
+        if not first:
+            out.write(f"\x1b[{len(options)}A")      # back to the first option
+        for i, opt in enumerate(options):
+            mark = "\x1b[1;36m❯" if i == current else " "
+            out.write(f"\r\x1b[2K  {mark} {i + 1}. {opt}\x1b[0m\n")
+        out.flush()
+
+    console.print(f"  [bold]{escape(question)}[/bold]  "
+                  f"[dim]↑/↓ or 1-{len(options)}, Enter to confirm, Esc for no[/dim]")
+    draw(True)
+    fd = _sys.stdin.fileno()
+    saved = termios.tcgetattr(fd)
+    try:
+        tty.setcbreak(fd)
+        while True:
+            key = os.read(fd, 1)
+            if key in (b"\r", b"\n"):
+                break
+            if key.isdigit() and 1 <= int(key) <= len(options):
+                current = int(key) - 1
+                draw(False)
+                break
+            if key in (b"y", b"Y"):
+                current = 0
+                draw(False)
+                break
+            if key in (b"n", b"N", b"\x03"):            # n, or Ctrl-C
+                current = cancel
+                draw(False)
+                break
+            if key == b"\x1b":
+                # A lone Esc, or the start of an arrow key's escape sequence.
+                if not select.select([fd], [], [], 0.05)[0]:
+                    current = cancel
+                    draw(False)
+                    break
+                seq = os.read(fd, 2)
+                if seq in (b"[A", b"OA"):
+                    current = (current - 1) % len(options)
+                elif seq in (b"[B", b"OB"):
+                    current = (current + 1) % len(options)
+                draw(False)
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+    return current
+
+
+def _choose_by_number(question: str, options: list[str], cancel: int) -> int:
+    console.print(f"  [bold]{escape(question)}[/bold]")
+    for i, opt in enumerate(options):
+        console.print(f"    {i + 1}. {escape(opt)}")
+    try:
+        raw = console.input(f"  [dim]1-{len(options)}, Enter for 1:[/dim] ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return cancel
+    if not raw:
+        return 0
+    if raw.isdigit() and 1 <= int(raw) <= len(options):
+        return int(raw) - 1
+    return {"y": 0, "yes": 0, "a": 1, "always": 1}.get(raw.lower(), cancel)
+
+
 def make_asker(config: dict, on_approve=None):
     """The permission prompt. `on_approve(name)` runs just before a yes returns,
     so the caller can show progress for the call that is about to run."""
@@ -209,19 +291,30 @@ def make_asker(config: dict, on_approve=None):
             if p.verdict:
                 console.print(f"  {p.verdict}", style="bold red", markup=False,
                               highlight=False)
-        try:
-            answer = console.input("  [bold]Allow?[/bold] [y]es / [n]o / "
-                                   "[a]lways this session: ").strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            return False
-        ok = answer.startswith(("y", "a")) or answer == ""
-        if answer.startswith("a"):
-            config["accept_all"] = True
-        if ok:
-            ask.previewed.add(id(params))
-            if on_approve:
-                on_approve(name, params)
-        return ok
+        what = {"Write": "this write", "Edit": "this edit",
+                "Bash": "this command"}.get(name, f"this {name}")
+        choice = choose(f"Allow {what}?", [
+            "Yes",
+            "Yes, and don't ask again this session",
+            "No, and tell it what to do instead",
+        ], cancel=2)
+        if choice == 2:
+            try:
+                why = console.input("  [dim]What should it do instead? "
+                                    "(Enter to just refuse)[/dim] ").strip()
+            except (EOFError, KeyboardInterrupt):
+                why = ""
+            return why or False
+        if choice == 1:
+            # Underscore-prefixed keys are runtime-only and never saved, so
+            # "this session" cannot leak into config.toml the next time
+            # anything calls /config.
+            config["_accept_session"] = True
+            console.print("  [dim]Not asking again until you quit.[/dim]")
+        ask.previewed.add(id(params))
+        if on_approve:
+            on_approve(name, params)
+        return True
     ask.previewed = set()
     return ask
 
@@ -373,7 +466,8 @@ def run_turn(state: loop.State, config: dict, tracker) -> None:
                     # Nothing is asked for a read-only call, and nothing at all
                     # under --accept-all, so the spinner starts here; otherwise
                     # it starts once the call has been approved.
-                    if event.name not in tools.MUTATING or config.get("accept_all"):
+                    if (event.name not in tools.MUTATING or config.get("accept_all")
+                            or config.get("_accept_session")):
                         start_status(f"running {event.name} … Ctrl-C interrupts")
             elif kind == "ToolEnd":
                 failed = event.denied or event.result.startswith("Error")

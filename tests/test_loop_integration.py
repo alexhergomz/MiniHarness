@@ -965,3 +965,43 @@ def test_the_loop_checkpoints_the_baseline_and_every_accepted_change(
     base = checkpoint.history(cfg, "loop-test")[-1][0]
     checkpoint.restore(cfg, "loop-test", base)
     assert f.read_text() == "print(1)\n"
+
+
+def test_always_stops_the_prompts_for_the_rest_of_the_same_turn(tmp_path, monkeypatch):
+    """"Always" used to be read once per turn, so it kept asking until the
+    next message. It must also never be written to config.toml."""
+    from miniharness import config as cfg_mod
+    cfg = dict(BASE, _cwd=str(tmp_path), accept_all=False)
+    asked = []
+
+    def ask(name, params):
+        asked.append(name)
+        cfg["_accept_session"] = True          # what choosing "always" does
+        return True
+
+    state = loop.State(messages=[{"role": "user", "content": "go"}])
+    drain(state, cfg, monkeypatch, script(
+        AssistantTurn(text="", finish_reason="tool_calls", tool_calls=[
+            {"id": "c1", "name": "Bash", "input": {"command": "true"}},
+            {"id": "c2", "name": "Bash", "input": {"command": "true"}}]),
+        AssistantTurn(text="done", finish_reason="stop"),
+    ), ask=ask)
+    assert asked == ["Bash"], f"asked again after 'always': {asked}"
+
+    monkeypatch.setattr(cfg_mod, "CONFIG_PATH", tmp_path / "config.toml")
+    monkeypatch.setattr(cfg_mod, "HOME", tmp_path)
+    cfg_mod.save(cfg)
+    assert "accept" not in (tmp_path / "config.toml").read_text()
+
+
+def test_a_refusal_can_say_what_to_do_instead(tmp_path, monkeypatch):
+    cfg = dict(BASE, _cwd=str(tmp_path), accept_all=False)
+    state = loop.State(messages=[{"role": "user", "content": "go"}])
+    events = drain(state, cfg, monkeypatch, script(
+        AssistantTurn(text="", finish_reason="tool_calls", tool_calls=[
+            {"id": "c1", "name": "Bash", "input": {"command": "rm -rf build"}}]),
+        AssistantTurn(text="ok", finish_reason="stop"),
+    ), ask=lambda n, p: "use make clean instead")
+    ends = [e for e in events if type(e).__name__ == "ToolEnd"]
+    assert ends[0].denied
+    assert "use make clean instead" in state.messages[2]["content"]

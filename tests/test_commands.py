@@ -461,3 +461,12 @@ def test_sampling_is_the_model_cards_unless_the_user_overrules_it(monkeypatch):
             assert "temperature" not in captured, "the harness overrode the model"
         else:
             assert captured["temperature"] == 0.2
+
+
+def test_the_approval_menu_without_a_terminal_takes_a_number(monkeypatch):
+    """Piped input gets a numbered prompt; the old `[y]es / [n]o` text was
+    swallowed by Rich markup and rendered as "es / o"."""
+    from miniharness import __main__ as m
+    for typed, want in (("", 0), ("2", 1), ("3", 2), ("y", 0), ("a", 1), ("nope", 2)):
+        monkeypatch.setattr(m.console, "input", lambda *a, _t=typed, **k: _t)
+        assert m._choose_by_number("Allow?", ["Yes", "Always", "No"], cancel=2) == want

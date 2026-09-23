@@ -406,7 +406,6 @@ def run(
 ) -> Generator[Any, None, None]:
     """Run the agent until it stops calling tools. Yields events."""
     schemas = tools.schemas_for(config)
-    accept_all = bool(config.get("accept_all"))
     max_turns = int(config.get("max_turns", 100))
     state.continuations = 0
     state.empty_retries = 0
@@ -487,16 +486,26 @@ def run(
             name, params = tc["name"], tc["input"]
             yield ToolStart(name, params, used_turns + 1, max_turns)
 
-            denied = False
+            denied, feedback = False, ""
             if name in tools.MUTATING:
                 # Before the call, not after: "the tree before the agent
                 # touched anything" cannot be reconstructed once it has.
                 checkpoint.ensure_baseline(config, state.session_id)
-                if not accept_all and ask_permission is not None:
-                    if not ask_permission(name, params):
+                # Read live, not once per turn: answering "always" in the
+                # middle of a turn has to stop the prompts for the rest of it.
+                if (not (config.get("accept_all") or config.get("_accept_session"))
+                        and ask_permission is not None):
+                    # True allows. Anything else denies — and a string is the
+                    # user saying what to do instead, which is worth more to
+                    # the model than a bare refusal it has to guess around.
+                    verdict = ask_permission(name, params)
+                    if verdict is not True:
                         denied = True
+                        feedback = verdict.strip() if isinstance(verdict, str) else ""
             if denied:
-                result = "The user denied this action. Do not retry it; ask what to do instead."
+                result = ("The user denied this action. Do not retry it. "
+                          + (f"They said: {feedback}" if feedback
+                             else "Ask what to do instead."))
             elif (resume := _resume_point(state.messages, all_ids,
                                           sig := (name, json.dumps(params, sort_keys=True)))):
                 # The same read-only call, and last time it did not all fit.
