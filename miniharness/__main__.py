@@ -13,6 +13,7 @@ import time as _time
 
 from rich.console import Console
 from rich.markup import escape
+from rich.text import Text
 
 from . import config as cfg_mod
 from . import checkpoint, context, loop, models, preview, research, server, session, tools
@@ -27,12 +28,20 @@ HELP = """\
   /config [k=v]         show or set configuration
   /compact              shrink the conversation now
   /think [on|off]       show the last turn's reasoning, or toggle live display
+  /diff [-n]            what changed this session (or since n changes ago)
   /undo                 revert the last file write or edit
   /checkpoints          list the snapshots taken after each accepted change
   /rewind [-n|sha]      restore the working tree to a checkpoint
+  /clear                start a fresh conversation (files are left as they are)
   /resume [id]          resume a previous session (default: the most recent)
   /research <question>  spawn a bounded research run; writes a markdown report
   /quit                 exit
+
+[bold]In a message[/bold]
+  @path                 attach a file — the model sees it without spending a turn
+  !command              run a shell command yourself; its output goes with your
+                        next message
+  Tab                   complete /commands and @paths
 
 [dim]Ctrl-C interrupts a turn. Ctrl-D exits.[/dim]"""
 
@@ -120,41 +129,100 @@ def choose_model(config: dict) -> bool:
 
 
 # ── Permission ──────────────────────────────────────────────────────────────
-def _line_style(line: str) -> str:
-    if line.startswith(("!!", "will be REFUSED", "will FAIL")):
-        return "bold red"
-    if line.startswith("+"):
-        return "green"
-    if line.startswith("-"):
-        return "red"
-    if line.startswith("@@"):
-        return "cyan"
-    return "dim"
+# ── Change rendering ────────────────────────────────────────────────────────
+# One look for a change, wherever it is shown — the approval prompt, the
+# transcript under --accept-all, /diff. Line numbers, a sign, and the changed
+# words marked inside an edited line, the way an editor's diff view does it.
+# Foreground colour only: a background band that suits a dark terminal is a
+# black stripe on a light one.
+_KIND_STYLE = {"add": "green", "del": "red", "ctx": "", "gap": "dim"}
+_KIND_SIGN = {"add": "+", "del": "-", "ctx": " "}
 
 
-def make_asker(config: dict):
+def _rel(path: str, config: dict) -> str:
+    """A path as the user would type it: relative to the working directory."""
+    cwd = config.get("_cwd") or os.getcwd()
+    try:
+        full = os.path.abspath(path if os.path.isabs(path) else os.path.join(cwd, path))
+        rel = os.path.relpath(full, cwd)
+        return path if rel.startswith("..") else rel
+    except ValueError:
+        return path
+
+
+def print_rows(rows: list, limit: int = preview.MAX_DIFF_ROWS, indent: str = "     ") -> None:
+    if not rows:
+        return
+    width = len(str(max((r.new_no or r.old_no or 0) for r in rows)))
+    for r in rows[:limit]:
+        if r.kind == "gap":
+            console.print(f"{indent}{'⋮':>{width}}", style="dim", highlight=False)
+            continue
+        num = r.old_no if r.kind == "del" else r.new_no
+        line = Text(f"{indent}{num:>{width}} ", style="dim")
+        body = Text(f"{_KIND_SIGN[r.kind]} {r.text}", style=_KIND_STYLE[r.kind])
+        for a, b in r.spans:
+            body.stylize("bold reverse", a + 2, b + 2)
+        line.append(body)
+        console.print(line, highlight=False, soft_wrap=False, overflow="fold")
+    if len(rows) > limit:
+        console.print(f"{indent}… {len(rows) - limit} more lines — /diff shows "
+                      f"everything", style="dim", highlight=False)
+
+
+def print_change(path: str, before: str | None, after: str, config: dict,
+                 pending: bool = False) -> None:
+    """A change the way the transcript shows one: a summary line, then the diff."""
+    rel = _rel(path, config)
+    console.print(f"  ⎿  {preview.summary(rel, before, after, pending)}",
+                  style="dim", highlight=False, markup=False)
+    if before is None:
+        lines = after.splitlines()
+        rows = [preview.Row("add", None, i + 1, l.expandtabs(4))
+                for i, l in enumerate(lines[:preview.MAX_NEW_FILE_LINES])]
+        print_rows(rows)
+        if len(lines) > preview.MAX_NEW_FILE_LINES:
+            console.print(f"     … {len(lines) - preview.MAX_NEW_FILE_LINES} more "
+                          f"lines", style="dim", highlight=False)
+    else:
+        print_rows(preview.diff_rows(before, after))
+    if (loud := preview.gutting(before, after)):
+        console.print(f"  {loud}", style="bold red", markup=False, highlight=False)
+
+
+def make_asker(config: dict, on_approve=None):
+    """The permission prompt. `on_approve(name)` runs just before a yes returns,
+    so the caller can show progress for the call that is about to run."""
     def ask(name: str, params: dict) -> bool:
-        if name == "Bash":
-            detail = params.get("command", "")
-        else:
-            detail = params.get("file_path", "")
-        console.print(f"\n[bold yellow]{name}[/bold yellow] {escape(str(detail))}")
-        # Say what the call will actually do. A name and a path is not enough
-        # to consent to: the model has replaced a 1,002-line module with three
-        # lines, and that write looked exactly like any other from here.
-        # markup=False because file content is not rich markup — a line
-        # containing [dim] is a line of code.
-        for line in preview.describe(name, params, config).splitlines():
-            console.print("  " + line, markup=False, style=_line_style(line),
-                          highlight=False)
+        # The tool line itself is already on screen (ToolStart). What is left
+        # to say is what the call will actually do. A name and a path is not
+        # enough to consent to: the model has replaced a 1,002-line module with
+        # three lines, and that write looked exactly like any other from here.
+        p = preview.plan(name, params, config)
+        if p is not None:
+            if p.note:
+                for line in p.note.splitlines():
+                    console.print(f"     {line}", style="dim", markup=False,
+                                  highlight=False)
+            if p.after is not None:
+                print_change(p.path, p.before, p.after, config, pending=True)
+            if p.verdict:
+                console.print(f"  {p.verdict}", style="bold red", markup=False,
+                              highlight=False)
         try:
-            answer = console.input("  [y]es / [n]o / [a]lways: ").strip().lower()
+            answer = console.input("  [bold]Allow?[/bold] [y]es / [n]o / "
+                                   "[a]lways this session: ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             return False
+        ok = answer.startswith(("y", "a")) or answer == ""
         if answer.startswith("a"):
             config["accept_all"] = True
-            return True
-        return answer.startswith("y") or answer == ""
+        if ok:
+            ask.previewed.add(id(params))
+            if on_approve:
+                on_approve(name, params)
+        return ok
+    ask.previewed = set()
     return ask
 
 
@@ -172,9 +240,64 @@ def _repair_note(state: loop.State) -> str:
     return f", {n} interrupted tool call(s) repaired" if n else ""
 
 
+def _tool_detail(name: str, params: dict, config: dict) -> str:
+    if (fp := params.get("file_path")):
+        return _rel(str(fp), config)
+    return str(params.get("command") or params.get("pattern") or params.get("name")
+               or params.get("url") or params.get("query") or "")
+
+
+def _result_line(name: str, result: str) -> tuple[str, int]:
+    """The one line of a result worth showing, and how many lines there were.
+
+    For a command that is the *last* line: pytest, make, cargo and most other
+    tools print progress first and the verdict at the end, so the first line of
+    a passing test run was a row of dots.
+    """
+    import re as _re
+    lines = [l.strip() for l in (result or "").splitlines() if l.strip()]
+    if not lines:
+        return "", 0
+    if name == "Read" and not lines[0].startswith("Error"):
+        return f"Read {len(lines)} lines", 1     # the content is for the model
+    if name != "Bash":
+        return lines[0], len(lines)
+    tail = lines[-1]
+    if _re.fullmatch(r"\[exit \d+\]", tail) and len(lines) > 1:
+        tail = f"{lines[-2]}  {tail}"
+    return _re.sub(r"\s{2,}", "  ", tail), len(lines)
+
+
+def _context_note(state: loop.State, config: dict) -> str:
+    size = int(config.get("llama_ctx") or 0)          # display only, not a budget
+    if not size:
+        return ""
+    used = context.estimate_tokens(state.messages, state.system)
+    return f"context {100 * used / size:.0f}% of {size / 1024:.0f}k"
+
+
 def run_turn(state: loop.State, config: dict, tracker) -> None:
     """Run one user message to completion, rendering events as they arrive."""
-    asker = make_asker(config)
+    status = None                       # a live spinner, while something runs
+
+    def stop_status():
+        nonlocal status
+        if status is not None:
+            status.stop()
+            status = None
+
+    def start_status(text: str):
+        nonlocal status
+        stop_status()
+        status = console.status(f"[dim]{text}[/dim]", spinner="dots")
+        status.start()
+
+    def on_approve(name, params):
+        if name == "Bash":
+            start_status(f"running {str(params.get('command', ''))[:60]} … "
+                         f"Ctrl-C interrupts")
+
+    asker = make_asker(config, on_approve)
     buffer: list[str] = []
     think_buf: list[str] = []
     streaming = False
@@ -182,9 +305,14 @@ def run_turn(state: loop.State, config: dict, tracker) -> None:
     think_start = last_tick = 0.0
     think_bytes = 0
     show_think = bool(config.get("show_thinking"))
+    turn_start = _time.monotonic()
+    calls = rounds = 0
+    changed: dict[str, None] = {}           # ordered set of files written
+    pending: dict[int, tuple] = {}          # id(params) -> (path, before, t0)
 
     try:
         for event in loop.run(state, config, asker, tracker):
+            stop_status()
             kind = type(event).__name__
             if kind == "TextChunk":
                 if thinking:
@@ -213,12 +341,10 @@ def run_turn(state: loop.State, config: dict, tracker) -> None:
                                   markup=False, highlight=False)
                 else:
                     # A static "thinking…" is indistinguishable from a hang, and
-                    # was twice diagnosed as one. It used to be bounded by the
-                    # continuation notices, which fired every time the reply cap
-                    # was hit — but the cap is gone (§2.8), so a turn can now
-                    # deliberate for minutes with nothing between "thinking…"
-                    # and the tool call. Counting the chunks already arriving
-                    # costs nothing and needs no server-specific endpoint.
+                    # was twice diagnosed as one. The cap that used to punctuate
+                    # it is gone (§2.8), so a turn can deliberate for minutes
+                    # with nothing else on screen. Counting the chunks already
+                    # arriving costs nothing and works with any server.
                     now = _time.monotonic()
                     if now - last_tick >= 0.5:
                         last_tick = now
@@ -230,40 +356,88 @@ def run_turn(state: loop.State, config: dict, tracker) -> None:
                 if streaming or thinking:
                     console.print()
                     streaming = thinking = False
-                detail = (event.params.get("command")
-                          or event.params.get("file_path")
-                          or event.params.get("pattern")
-                          or event.params.get("name")
-                          or event.params.get("url") or "")
-                console.print(f"[dim]-> {event.name} {str(detail)[:100]}[/dim]")
+                calls += 1
+                rounds = max(rounds, event.round)
+                console.print(Text.assemble(
+                    ("● ", "cyan"), (event.name, "bold"),
+                    (f"({_tool_detail(event.name, event.params, config)[:100]})", "")),
+                    highlight=False)
+                before = None
+                if event.name in ("Write", "Edit") and event.params.get("file_path"):
+                    target = tools._resolve(str(event.params["file_path"]), config)
+                    before = preview._read(target) if target.exists() else None
+                    pending[id(event.params)] = (str(event.params["file_path"]),
+                                                 before, _time.monotonic())
+                else:
+                    pending[id(event.params)] = ("", None, _time.monotonic())
+                    # Nothing is asked for a read-only call, and nothing at all
+                    # under --accept-all, so the spinner starts here; otherwise
+                    # it starts once the call has been approved.
+                    if event.name not in tools.MUTATING or config.get("accept_all"):
+                        start_status(f"running {event.name} … Ctrl-C interrupts")
             elif kind == "ToolEnd":
-                colour = "red" if event.denied or event.result.startswith("Error") else "dim"
-                lines = event.result.splitlines() if event.result else [""]
-                more = f"  (+{len(lines) - 1} lines)" if len(lines) > 1 else ""
+                failed = event.denied or event.result.startswith("Error")
+                # Match the end to its start by the call's params object, which
+                # the loop passes through unchanged.
+                key = next(reversed(pending), None)
+                path, before, t0 = pending.pop(key, ("", None, _time.monotonic()))
+                spent = _time.monotonic() - t0
+                took = f" · {spent:.1f}s" if spent >= 1.0 else ""
+                if event.name in ("Write", "Edit") and path and not failed:
+                    target = tools._resolve(path, config)
+                    after = preview._read(target) if target.exists() else ""
+                    changed[_rel(path, config)] = None
+                    # Shown already, in the approval prompt: one line will do.
+                    shown = key in asker.previewed
+                    asker.previewed.discard(key)
+                    if shown:
+                        console.print(f"  ⎿  {preview.summary(_rel(path, config), before, after)}{took}",
+                                      style="dim", markup=False, highlight=False)
+                    else:
+                        print_change(path, before, after, config)
+                    continue
+                head, n = _result_line(event.name, event.result)
+                more = f"  (+{n - 1} lines)" if n > 1 else ""
                 # style= not markup: tool output contains brackets that Rich
                 # would otherwise try to parse as tags.
-                console.print(f"   {lines[0][:140]}{more}",
-                              style=colour, markup=False, highlight=False)
+                console.print(f"  ⎿  {head[:140]}{more}{took}",
+                              style="red" if failed else "dim",
+                              markup=False, highlight=False)
+            elif kind == "Compacting":
+                if streaming or thinking:
+                    console.print()
+                    streaming = thinking = False
+                # A model call: tens of seconds that would otherwise be silence.
+                start_status(f"compacting ~{event.tokens:,} tokens of history — "
+                             f"the model is writing a note of what matters")
             elif kind == "Notice":
-                console.print(f"[yellow]{event.text}[/yellow]")
+                if streaming or thinking:
+                    console.print()
+                    streaming = thinking = False
+                console.print(f"[yellow]{escape(event.text)}[/yellow]")
             elif kind == "TurnDone":
                 if streaming or thinking:
                     console.print()
                     streaming = thinking = False
     except KeyboardInterrupt:
+        stop_status()
         console.print("\n[yellow]interrupted[/yellow]")
         # Keep history well-formed: a dangling assistant tool_call with no tool
         # response is a guaranteed 400 on the next request.
         if (n := loop.repair_history(state.messages)):
-            console.print(f"[dim]  ({n} pending tool call(s) marked interrupted)[/dim]")
+            console.print(f"[dim]  ({n} pending tool call(s) marked interrupted — "
+                          f"everything before them is kept)[/dim]")
     except Exception as e:
-        console.print(f"[red]{type(e).__name__}: {e}[/red]")
+        stop_status()
+        console.print(f"[red]{type(e).__name__}: {escape(str(e))}[/red]")
         return
+    finally:
+        stop_status()
 
     state.last_thinking = "".join(think_buf)
     if state.last_thinking and not show_think:
         n = len(state.last_thinking) // 4
-        console.print(f"[dim]  (~{n} tokens of reasoning — /think to view)[/dim]")
+        console.print(f"[dim]  (~{n:,} tokens of reasoning — /think to view)[/dim]")
 
     session.append(state.session_id, {"messages": state.messages})
 
@@ -271,12 +445,151 @@ def run_turn(state: loop.State, config: dict, tracker) -> None:
     # Same budget the loop uses, so a turn cannot start already over it.
     budget = cfg_mod.history_budget(config, tools.schemas_for(config))
     used = context.estimate_tokens(state.messages, state.system)
-    if used > budget:
-        state.messages, freed = context.compact_with_model(
-            state.messages, int(budget * float(config.get('compact_to', 0.6))),
-            config['model'], state.system, config)
+    if used > budget and config.get("model"):
+        t0 = _time.monotonic()
+        with console.status(f"[dim]compacting ~{used:,} tokens of history — the "
+                            f"model is writing a note of what matters[/dim]"):
+            state.messages, freed = context.compact_with_model(
+                state.messages, int(budget * float(config.get('compact_to', 0.6))),
+                config['model'], state.system, config)
         if freed:
-            console.print(f"[dim]compacted: reclaimed ~{freed} tokens[/dim]")
+            console.print(f"[dim]compacted: reclaimed ~{freed:,} tokens in "
+                          f"{_time.monotonic() - t0:.0f}s[/dim]")
+
+    # The footer: what the turn cost and what it changed. The last part is the
+    # one that matters — the undo exists, and nothing used to say so.
+    parts = [f"{_time.monotonic() - turn_start:.0f}s"]
+    if calls:
+        parts.append(f"{calls} tool call{'s' * (calls != 1)}")
+        if (mx := int(config.get("max_turns", 100))) and rounds >= mx * 0.8:
+            parts.append(f"{rounds} of {mx} rounds")
+    if changed:
+        parts.append(f"{len(changed)} file{'s' * (len(changed) != 1)} changed")
+    if (ctx := _context_note(state, config)):
+        parts.append(ctx)
+    console.print(f"[dim]✓ {' · '.join(parts)}[/dim]")
+    if changed:
+        console.print("[dim]  /diff to review · /rewind to undo[/dim]")
+
+
+def show_unified(stat: str, text: str, title: str) -> None:
+    """A whole unified diff, coloured, through the pager when it is long."""
+    def emit():
+        console.print(f"[bold]{escape(title)}[/bold]")
+        for line in stat.splitlines():
+            console.print("  " + line, style="dim", markup=False, highlight=False)
+        console.print()
+        for line in text.splitlines():
+            style = ("bold" if line.startswith(("diff --git", "+++", "---"))
+                     else "cyan" if line.startswith("@@")
+                     else "green" if line.startswith("+")
+                     else "red" if line.startswith("-") else "")
+            console.print(line, style=style, markup=False, highlight=False,
+                          soft_wrap=True)
+    if len(text.splitlines()) > (console.size.height or 40) - 4:
+        with console.pager(styles=True):
+            emit()
+    else:
+        emit()
+
+
+# ── Things typed into a message ─────────────────────────────────────────────
+# Output of `!command`, waiting to go out with the next message. It is not sent
+# on its own: a user message with no question in it would make the model guess
+# what to do with it, and two user messages in a row break the alternation
+# some chat templates require.
+_PENDING_SHELL: list[str] = []
+
+
+def run_shell(cmd: str, config: dict) -> None:
+    """The user's own command. Not jailed: the jail exists to bound the
+    *model*, and the person at the keyboard already has a shell."""
+    import subprocess
+    try:
+        r = subprocess.run(cmd, shell=True, cwd=config["_cwd"], capture_output=True,
+                           text=True, timeout=600)
+        out = (r.stdout + r.stderr).rstrip()
+        if r.returncode:
+            out += f"\n[exit {r.returncode}]"
+    except subprocess.TimeoutExpired:
+        out = "[timed out after 600s]"
+    for line in (out or "[no output]").splitlines():
+        console.print(line, style="dim", markup=False, highlight=False)
+    _PENDING_SHELL.append(f"I ran `{cmd}` myself:\n```\n"
+                          f"{tools._truncate(out or '[no output]', tools.output_cap(config))}"
+                          f"\n```")
+    console.print("[dim]  (goes with your next message)[/dim]")
+
+
+def compose_message(line: str, config: dict, tracker) -> str:
+    """The message as sent: shell output first, then the text, then any @files.
+
+    An @file is attached with the same Read the model would have issued —
+    same jail, same cap, and marked as read — so the model can edit it on
+    its first call instead of spending one turn discovering it.
+    """
+    import re as _re
+    parts = list(_PENDING_SHELL)
+    _PENDING_SHELL.clear()
+    parts.append(line)
+    seen = set()
+    for m in _re.finditer(r"(?<!\S)@([^\s]+)", line):
+        ref = m.group(1).rstrip(".,;:!?)")
+        target = tools._resolve(ref, config)
+        if ref in seen or not target.is_file():
+            continue
+        seen.add(ref)
+        body = tools.dispatch("Read", {"file_path": ref}, config, tracker)
+        if body.startswith("Error"):
+            console.print(f"[yellow]not attached: {escape(body)}[/yellow]")
+            continue
+        parts.append(f"Contents of `{ref}`, attached by me:\n{body}")
+        console.print(f"[dim]  attached {escape(ref)}[/dim]")
+    return "\n\n".join(parts)
+
+
+def _commands() -> list[str]:
+    import re as _re
+    return sorted(set(_re.findall(r"^\s+(/[a-z]+)", HELP, _re.M)) | {"/exit"})
+
+
+def make_completer(config: dict):
+    """Tab completion for /commands and @paths. None without prompt_toolkit."""
+    try:
+        from prompt_toolkit.completion import Completer, Completion
+    except ImportError:
+        return None
+    commands = _commands()
+    skip = {".git", "__pycache__", "node_modules", ".venv", "venv", ".mypy_cache",
+            ".pytest_cache", ".ruff_cache"}
+
+    class _C(Completer):
+        def get_completions(self, document, complete_event):
+            text = document.text_before_cursor
+            if text.startswith("/") and " " not in text:
+                for c in commands:
+                    if c.startswith(text):
+                        yield Completion(c, -len(text))
+                return
+            word = document.get_word_before_cursor(WORD=True)
+            if not word.startswith("@"):
+                return
+            frag = word[1:]
+            head, _, prefix = frag.rpartition("/")
+            base = os.path.join(config["_cwd"], head)
+            try:
+                names = sorted(os.listdir(base))
+            except OSError:
+                return
+            for name in names:
+                if name in skip or (name.startswith(".") and not prefix.startswith(".")):
+                    continue
+                if name.startswith(prefix):
+                    full = os.path.join(base, name)
+                    rel = f"{head}/{name}" if head else name
+                    tail = "/" if os.path.isdir(full) else ""
+                    yield Completion("@" + rel + tail, -len(word), display=name + tail)
+    return _C()
 
 
 # ── Slash commands ──────────────────────────────────────────────────────────
@@ -357,6 +670,43 @@ def handle_command(line: str, state: loop.State, config: dict, tracker) -> bool:
 
     elif cmd == "/undo":
         console.print(tools.undo_last())
+
+    elif cmd == "/diff":
+        rows = checkpoint.history(config, state.session_id)
+        if not rows:
+            console.print("Nothing has changed this session."
+                          if checkpoint.enabled(config)
+                          else "Checkpoints are off (or git is not installed), so "
+                               "there is no record of what changed.")
+            return True
+        ref = arg.lstrip("-")
+        if ref.isdigit():
+            if int(ref) >= len(rows):
+                console.print(f"Only {len(rows)} checkpoint(s); the oldest is -{len(rows) - 1}.")
+                return True
+            target, what = rows[int(ref)][0], f"the last {ref} change(s)"
+        else:
+            target, what = checkpoint.baseline(config, state.session_id), "this session"
+        text = checkpoint.diff(config, state.session_id, target)
+        if not text.strip():
+            console.print(f"No changes in {what}.")
+            return True
+        show_unified(checkpoint.changes_since(config, state.session_id, target), text,
+                     f"Changes in {what}")
+
+    elif cmd == "/clear":
+        # A new conversation, not a new working tree: the files stay as they
+        # are, and the previous conversation is still on disk for /resume.
+        old_id = state.session_id
+        fresh = loop.State(system=state.system, session_id=session.new_id(config["_cwd"]))
+        for f in ("messages", "continuations", "empty_retries", "last_thinking",
+                  "recent_thinking", "ledger", "compact_floor", "session_id"):
+            setattr(state, f, getattr(fresh, f))
+        if tracker is not None:
+            tracker._read.clear()
+        _PENDING_SHELL.clear()
+        console.print(f"Started a new conversation. The last one is kept: "
+                      f"[bold]/resume {old_id}[/bold]")
 
     elif cmd == "/checkpoints":
         rows = checkpoint.history(config, state.session_id)
@@ -521,7 +871,7 @@ def main(argv=None) -> int:
             console.print(f"[dim]{msg}[/dim]")
 
     if args.prompt:
-        state.add_user(args.prompt)
+        state.add_user(compose_message(args.prompt, config, tracker))
         run_turn(state, config, tracker)
         return 0
 
@@ -532,7 +882,9 @@ def main(argv=None) -> int:
         from prompt_toolkit import PromptSession
         from prompt_toolkit.history import FileHistory
         cfg_mod.HOME.mkdir(parents=True, exist_ok=True)
-        psession = PromptSession(history=FileHistory(str(cfg_mod.HOME / "history")))
+        psession = PromptSession(history=FileHistory(str(cfg_mod.HOME / "history")),
+                                 completer=make_completer(config),
+                                 complete_while_typing=False)
         read_line = lambda: psession.prompt("> ")  # noqa: E731
     except ImportError:
         read_line = lambda: input("> ")  # noqa: E731
@@ -548,7 +900,11 @@ def main(argv=None) -> int:
             if not handle_command(line, state, config, tracker):
                 break
             continue
-        state.add_user(line)
+        if line.startswith("!"):
+            if (cmd := line[1:].strip()):
+                run_shell(cmd, config)
+            continue
+        state.add_user(compose_message(line, config, tracker))
         run_turn(state, config, tracker)
 
     server.stop()

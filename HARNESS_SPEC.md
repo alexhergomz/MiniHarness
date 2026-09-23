@@ -627,6 +627,28 @@ run that hit §2.7. The model stops when it is done, given the chance.
 
 ---
 
+### 2.9 The harness chose the model's sampling for it
+
+Every request carried `temperature: 0.3`. Nothing measured it; it was a
+plausible-looking constant. Qwen's own card says 0.6 for coding in thinking
+mode, with `top_k 20, min_p 0.0` — and llama-server, left alone, used its own
+defaults of `top_k 40, min_p 0.05`. So the model ran on a mixture: the
+harness's guess for one parameter, the server's generic defaults for the rest,
+and its authors' recommendation for none of them.
+
+Low temperature is exactly what feeds the repetition loops §2.7 had to contain.
+The harness was working against the model and calling it a default.
+
+The fix is not a better constant. The catalog now records what each family's
+card documents (`models.FAMILY_SAMPLING`), llama-server is launched with those
+values, and the harness sends no sampling at all unless the user sets it. A
+family whose card is silent gets the server's defaults — not a guess presented
+as a recommendation. Mechanical calls that need their own settings, such as the
+summariser at temperature 0.0, still set them explicitly for themselves.
+
+A server started by hand has to be given the same flags, or it falls back to
+llama.cpp's generic defaults. `server.sampling_args(path)` prints them.
+
 ## 3. Treating absence as completion
 
 ### 3.1 Empty turn read as "done" — *task silently unfinished*

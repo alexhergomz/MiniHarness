@@ -316,3 +316,148 @@ def test_the_progress_counter_stays_out_of_the_way_when_reasoning_is_shown(
     out = capsys.readouterr().out
     assert "deliberating" in out
     assert "tokens," not in out
+
+
+# ── Transcript and REPL conveniences ────────────────────────────────────────
+def test_a_diff_marks_only_the_words_that_changed():
+    """An edited line shows what changed inside it, not just that it changed."""
+    from miniharness import preview
+    rows = preview.diff_rows("a = 1\nb = total / (n - 1)\nc = 3\n",
+                             "a = 1\nb = total / n\nc = 3\n")
+    dels = [r for r in rows if r.kind == "del"]
+    adds = [r for r in rows if r.kind == "add"]
+    assert [r.old_no for r in dels] == [2] and [r.new_no for r in adds] == [2]
+    changed = "".join(dels[0].text[a:b] for a, b in dels[0].spans)
+    assert "(" in changed and "- 1)" in changed and "total" not in changed
+
+
+def test_an_applied_change_is_shown_even_when_nothing_asked(tmp_path, monkeypatch, capsys):
+    """Under --accept-all there is no prompt, so the transcript is the only
+    place a change can be seen. It used to be a one-line tool result."""
+    from miniharness import __main__ as m
+    from miniharness import context, loop
+    from miniharness.provider import AssistantTurn
+
+    f = tmp_path / "stats.py"
+    f.write_text("def mean(xs):\n    return sum(xs) / (len(xs) - 1)\n")
+    turns = [AssistantTurn(text="", finish_reason="tool_calls", tool_calls=[
+                 {"id": "1", "name": "Edit", "input": {
+                     "file_path": "stats.py",
+                     "old_string": "(len(xs) - 1)", "new_string": "len(xs)"}}]),
+             AssistantTurn(text="fixed", finish_reason="stop")]
+    monkeypatch.setattr(loop, "stream_complete", lambda *a, **k: iter([turns.pop(0)]))
+    tracker = context.FileTracker()
+    tracker.mark_read(str(f))
+    state = loop.State(messages=[{"role": "user", "content": "fix"}])
+    m.run_turn(state, {"model": "local", "_cwd": str(tmp_path), "accept_all": True},
+               tracker)
+
+    out = capsys.readouterr().out
+    assert "Updated stats.py with 1 addition and 1 removal" in out
+    assert "- " in out and "return sum(xs) / len(xs)" in out
+    assert "1 file changed" in out and "/rewind" in out, "the undo was not mentioned"
+
+
+def test_a_command_result_shows_its_verdict_not_its_progress_bar():
+    from miniharness import __main__ as m
+    head, n = m._result_line("Bash", "....   [100%]\n\n4 passed in 0.12s")
+    assert head == "4 passed in 0.12s" and n == 2
+    head, _ = m._result_line("Bash", "F [100%]\n1 failed in 0.1s\n[exit 1]")
+    assert head == "1 failed in 0.1s  [exit 1]"
+
+
+def test_an_at_file_is_attached_through_the_jailed_read(tmp_path):
+    """Attached with the same Read the model would use — so the jail applies,
+    and the file counts as read and can be edited on the first call."""
+    from miniharness import __main__ as m
+    from miniharness import context
+
+    (tmp_path / "a.py").write_text("x = 1\n")
+    cfg = {"_cwd": str(tmp_path)}
+    tracker = context.FileTracker()
+    msg = m.compose_message("look at @a.py and @nope.py", cfg, tracker)
+    assert "Contents of `a.py`" in msg and "x = 1" in msg
+    assert "nope.py`" not in msg.split("look at")[1].split("\n", 1)[1]
+    assert tracker.has_read(str(tmp_path / "a.py"))
+
+    out = m.compose_message("@/etc/shadow", cfg, context.FileTracker())
+    assert "Contents of" not in out, "an @mention went around the jail"
+
+
+def test_shell_output_waits_for_the_next_message(tmp_path):
+    """Sent alone it would be a user message with no question in it, and two
+    user messages in a row break chat templates that require alternation."""
+    from miniharness import __main__ as m
+    cfg = {"_cwd": str(tmp_path)}
+    m._PENDING_SHELL.clear()
+    m.run_shell("echo from-the-user", cfg)
+    msg = m.compose_message("what does that mean?", cfg, None)
+    assert msg.index("from-the-user") < msg.index("what does that mean?")
+    assert m.compose_message("next", cfg, None) == "next", "sent twice"
+
+
+def test_completion_offers_commands_and_paths(tmp_path):
+    pytest.importorskip("prompt_toolkit")
+    from prompt_toolkit.document import Document
+    from miniharness import __main__ as m
+
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "stats.py").write_text("")
+    (tmp_path / "__pycache__").mkdir()
+    c = m.make_completer({"_cwd": str(tmp_path)})
+    texts = lambda s: [x.text for x in c.get_completions(Document(s), None)]  # noqa: E731
+    assert texts("/di") == ["/diff"]
+    assert texts("see @s") == ["@src/"]
+    assert texts("@src/st") == ["@src/stats.py"]
+    assert texts("@_") == [], "noise directories should not be offered"
+
+
+def test_clear_starts_over_but_keeps_the_old_conversation(tmp_path):
+    from miniharness import __main__ as m
+    from miniharness import context, loop
+    state = loop.State(system="sys", messages=[{"role": "user", "content": "x"}],
+                       session_id="old-one")
+    tracker = context.FileTracker()
+    tracker.mark_read("/somewhere/a.py")
+    m.handle_command("/clear", state, {"_cwd": str(tmp_path)}, tracker)
+    assert state.messages == [] and state.system == "sys"
+    assert state.session_id != "old-one"
+    assert not tracker.has_read("/somewhere/a.py")
+
+
+def test_sampling_is_the_model_cards_unless_the_user_overrules_it(monkeypatch):
+    """The harness sent temperature 0.3 on every request, against Qwen's
+    documented 0.6 for coding — and low temperature is what drove the
+    repetition loops. The model's authors decide; the user may overrule."""
+    from miniharness import config as cfg_mod
+    from miniharness import server
+
+    cfg = dict(cfg_mod.DEFAULTS, llama_model_path="/m/Qwen3.5-4B-Q4_K_M.gguf",
+               llama_host="127.0.0.1", llama_port=8890, prefix_checkpoint=False)
+    args = server.build_args(cfg)
+    assert args[args.index("--temp") + 1] == "0.6"
+    assert args[args.index("--top-k") + 1] == "20"
+
+    unknown = server.build_args(dict(cfg, llama_model_path="/m/mystery-7b.gguf"))
+    assert "--temp" not in unknown, "a guess passed off as the model's own"
+
+    captured = {}
+
+    def fake_connect(url, headers, payload, config):
+        captured.update(payload)
+        raise RuntimeError("stop")
+
+    from miniharness import provider
+    monkeypatch.setattr(provider, "_connect", fake_connect)
+    for c in (dict(cfg_mod.DEFAULTS, model="local", max_retries=0),
+              dict(cfg_mod.DEFAULTS, model="local", max_retries=0, temperature=0.2)):
+        captured.clear()
+        try:
+            list(provider.stream("local", "sys", [], [], c))
+        except Exception:
+            pass
+        assert captured.get("messages"), "the request was never built"
+        if c["temperature"] == "":
+            assert "temperature" not in captured, "the harness overrode the model"
+        else:
+            assert captured["temperature"] == 0.2

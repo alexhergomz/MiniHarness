@@ -360,7 +360,9 @@ def test_context_is_compacted_inside_a_single_turn(tmp_path, monkeypatch):
                    script(*reads, AssistantTurn(text="done", finish_reason="stop")),
                    tracker=context.FileTracker())
 
-    assert any(type(e).__name__ == "Notice" and "compacted mid-turn" in e.text
+    kinds = [type(e).__name__ for e in events]
+    assert "Compacting" in kinds, "a compaction must be announced before it runs"
+    assert any(type(e).__name__ == "Notice" and e.text.startswith("compacted:")
                for e in events), "the loop must compact without waiting for the turn to end"
     assert context.estimate_tokens(state.messages, state.system) <= 2000
     assert_history_valid(state.messages)

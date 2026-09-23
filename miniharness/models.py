@@ -38,6 +38,7 @@ class ModelSpec:
     max_ctx_k: int = 0
     active_b: float = 0      # MoE: parameters active per token (0 = dense)
     min_gb: float = 0        # override when no small quant exists (e.g. MXFP4)
+    sampling: dict | None = None   # the model card's own values; None = card is silent
 
     _FAMILY_MAX_CTX = {"Qwen3.5": 256, "Qwen3": 256, "Gemma 4": 128,
                        "Nemotron": 128, "GPT-OSS": 128}
@@ -45,6 +46,27 @@ class ModelSpec:
     def __post_init__(self):
         if not self.max_ctx_k:
             self.max_ctx_k = self._FAMILY_MAX_CTX.get(self.family, 128)
+        if self.sampling is None:
+            self.sampling = FAMILY_SAMPLING.get(self.family)
+
+
+# What each model's own card recommends, passed to llama-server at launch so
+# they become the server's defaults for every request. The harness used to send
+# temperature 0.3 on every request instead, against Qwen's documented 0.6 for
+# coding — and low temperature is what drives a small model into the repetition
+# loops that cost most of a day of runs (HARNESS_SPEC §2.7). The rule is not a
+# better constant; it is that the harness does not overrule the model's authors.
+#
+# Only values a card actually documents are here. A family with no entry gets
+# llama-server's own defaults rather than a guess dressed up as a recommendation.
+FAMILY_SAMPLING: dict[str, dict] = {
+    # Qwen3.5 / Qwen3, thinking mode, precise coding.
+    "Qwen3.5": {"temp": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0},
+    "Qwen3":   {"temp": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0},
+    # Reasoning on.
+    "Nemotron": {"temp": 0.6, "top_p": 0.95},
+    "GPT-OSS":  {"temp": 1.0, "top_p": 1.0},
+}
 
 
 CATALOG: list[ModelSpec] = [
@@ -72,7 +94,9 @@ CATALOG: list[ModelSpec] = [
     ModelSpec("qwen3-coder-30b-a3b", "Qwen3",
               "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF", 30.0, 1.5, 1,
               "MoE: 30B total, 3B active — 30B quality at near-3B speed. "
-              "~18 GB at 4-bit. Best pick for a 24 GB card.", active_b=3.0),
+              "~18 GB at 4-bit. Best pick for a 24 GB card.", active_b=3.0,
+              sampling={"temp": 0.7, "top_p": 0.8, "top_k": 20,
+                        "repeat_penalty": 1.05}),
     ModelSpec("qwen3-32b", "Qwen3", "unsloth/Qwen3-32B-GGUF", 32.0, 4.0, 2,
               "Dense 32B, ~20 GB at 4-bit. Stronger than the MoE per token, "
               "but far slower and its KV cache is heavy."),
@@ -86,6 +110,29 @@ CATALOG: list[ModelSpec] = [
               "or one big card with most experts on CPU.", active_b=22.0),
 ]
 CATALOG_BY_KEY = {m.key: m for m in CATALOG}
+
+
+def spec_for_path(path: str) -> ModelSpec | None:
+    """The catalog entry a GGUF filename belongs to, or None.
+
+    Longest key match wins, so `qwen3-coder-30b-a3b` is not mistaken for
+    `qwen3-32b`, and `qwen3.5-4b` is not mistaken for `gemma4-e4b`.
+    """
+    name = os.path.basename(path).lower().replace("_", "-")
+    best = None
+    for m in CATALOG:
+        fam = re.sub(r"[ .-]", "", m.family.lower())
+        size = m.key.split("-")[-1]
+        if fam not in re.sub(r"[ .-]", "", name):
+            continue
+        if m.family == "Qwen3" and "qwen3.5" in name:
+            continue                      # "qwen3" is a prefix of "qwen3.5"
+        if ("coder" in m.key) != ("coder" in name):
+            continue
+        if re.search(rf"(?<![0-9a-z]){re.escape(size)}(?![0-9])", name):
+            if best is None or len(m.key) > len(best.key):
+                best = m
+    return best
 
 
 # ── Quant parsing / scoring ─────────────────────────────────────────────────

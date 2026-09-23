@@ -48,7 +48,30 @@ Then it downloads, writes `~/.miniharness/config.toml`, and starts
 ```
 /help    /model [name]    /models    /config [k=v]
 /compact /think [on|off]  /undo      /resume [id]    /research <question>
-/checkpoints              /rewind [-n|sha]
+/diff [-n]  /checkpoints  /rewind [-n|sha]  /clear
+```
+
+In a message, `@path` attaches a file (read through the same jail the model
+uses, and counted as read so the first call can be the edit), and `!command`
+runs a shell command yourself — its output goes along with your next message.
+Tab completes `/commands` and `@paths`.
+
+**What a turn looks like.** Each tool call is one line; a change is shown as a
+line-numbered diff with the edited words marked, whether or not anything asked
+first. A command's line is its verdict (`4 passed in 0.12s`), not its progress
+bar. Anything slow — a command, a compaction — has a spinner rather than
+silence. The turn ends with what it cost and what it changed:
+
+```
+● Edit(stats.py)
+  ⎿  Updated stats.py with 1 addition and 1 removal
+     4           total += x
+     5 -     return total / (len(xs) - 1)
+     5 +     return total / len(xs)
+● Bash(python3 -m pytest -q)
+  ⎿  1 passed in 0.01s
+✓ 14s · 2 tool calls · 1 file changed · context 9% of 128k
+  /diff to review · /rewind to undo
 ```
 
 **Reasoning models.** Chain-of-thought (`<think>` blocks, or a `reasoning_content`

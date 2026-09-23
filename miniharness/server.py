@@ -118,9 +118,30 @@ def build_args(config: dict) -> list[str]:
         SLOT_DIR.mkdir(parents=True, exist_ok=True)
         args += ["--slot-save-path", str(SLOT_DIR)]
 
+    # The model card's sampling, as the server's defaults. Every request that
+    # does not say otherwise gets them — including requests from other clients
+    # pointed at the same server. See models.FAMILY_SAMPLING for why the
+    # harness no longer sends its own on every request.
+    args += sampling_args(model_path)
+
     if (extra := config.get("llama_extra_args", "").strip()):
         args += shlex.split(extra)
     return args
+
+
+_SAMPLING_FLAGS = {"temp": "--temp", "top_p": "--top-p", "top_k": "--top-k",
+                   "min_p": "--min-p", "repeat_penalty": "--repeat-penalty",
+                   "presence_penalty": "--presence-penalty"}
+
+
+def sampling_args(model_path: str) -> list[str]:
+    """llama-server flags for the model card's sampling. Empty if unknown."""
+    from .models import spec_for_path
+    spec = spec_for_path(model_path)
+    out: list[str] = []
+    for key, val in ((spec.sampling or {}) if spec else {}).items():
+        out += [_SAMPLING_FLAGS[key], str(val)]
+    return out
 
 
 def suggested_ctx(config: dict) -> int:
@@ -129,11 +150,9 @@ def suggested_ctx(config: dict) -> int:
     Uses the catalog entry matching the GGUF filename. Unknown models get 0,
     meaning "let llama.cpp use the model's own default".
     """
-    from .models import DEFAULT_KV_DIV, CATALOG, detect_hardware, max_context_k
+    from .models import DEFAULT_KV_DIV, detect_hardware, max_context_k, spec_for_path
 
-    name = os.path.basename(config.get("llama_model_path", "")).lower()
-    spec = next((m for m in CATALOG if m.key.split("-")[-1] in name
-                 and m.family.lower().replace(".", "") in name.replace(".", "")), None)
+    spec = spec_for_path(config.get("llama_model_path", ""))
     if spec is None:
         return 0
     budget = detect_hardware().budget_gb

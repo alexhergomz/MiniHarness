@@ -76,7 +76,14 @@ DEFAULTS: dict[str, Any] = {
     "model": "",                     # e.g. "local", "gpt-4o", "ollama/qwen3-coder"
     "base_url": "",                  # explicit override; else derived from provider
     "api_key_env": "",               # explicit override; else derived from provider
-    "temperature": 0.3,
+    # Sampling. Empty means "the model's own": llama-server is launched with the
+    # model card's values (models.FAMILY_SAMPLING), and a request that sends
+    # nothing gets them. Set one here only to overrule the model's authors.
+    "temperature": "",
+    "top_p": "",
+    "top_k": "",
+    "min_p": "",
+    "presence_penalty": "",
     # An *idle* bound: how long to wait with nothing arriving, not a total
     # budget — a long generation streams continuously. At 600s, retried four
     # times, a stuck request cost 40 minutes of complete silence.
@@ -191,6 +198,9 @@ DEFAULTS: dict[str, Any] = {
 }
 
 
+SAMPLING_KEYS = ("temperature", "top_p", "top_k", "min_p", "presence_penalty")
+
+
 def _coerce(default: Any, raw: str) -> Any:
     """Coerce a CLI/REPL string to the type of its default."""
     if isinstance(default, bool):
@@ -239,6 +249,14 @@ def set_value(cfg: dict[str, Any], key: str, raw: str) -> Any:
     """Set one key from a string, coercing to the default's type. Returns the value."""
     if key not in DEFAULTS:
         raise KeyError(f"unknown config key: {key}")
+    if key in SAMPLING_KEYS:
+        # "" or "default" hands the choice back to the model card.
+        raw = raw.strip()
+        val = "" if raw.lower() in ("", "default", "model") else (
+            int(float(raw)) if key == "top_k" else float(raw))
+        cfg[key] = val
+        save(cfg)
+        return val
     val = _coerce(DEFAULTS[key], raw)
     cfg[key] = val
     save(cfg)

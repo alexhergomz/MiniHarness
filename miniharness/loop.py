@@ -11,6 +11,7 @@ The loop yields events rather than printing. That keeps it UI-free and testable:
 from __future__ import annotations
 
 import json
+import time as _time
 import re
 from dataclasses import dataclass, field
 from typing import Any, Callable, Generator
@@ -29,6 +30,8 @@ EMPTY_STUB = "[no output produced]"
 class ToolStart:
     name: str
     params: dict
+    round: int = 0          # which tool round of this turn, 1-based
+    max_rounds: int = 0
 
 
 @dataclass
@@ -46,6 +49,13 @@ class TurnDone:
 @dataclass
 class Notice:
     text: str
+
+
+@dataclass
+class Compacting:
+    """A compaction is starting. It is a model call — tens of seconds of
+    silence otherwise, which reads as a hang. The next event means it ended."""
+    tokens: int
 
 
 @dataclass
@@ -250,6 +260,27 @@ def _with_focus_map(messages: list[dict], config: dict, tracker) -> list[dict]:
     }]
 
 
+def _compaction_due(state: State, config: dict, schemas: list[dict] | None = None) -> int:
+    """The history's size if a compaction should run now, else 0.
+
+    Separate from the compaction itself so the caller can say one is starting
+    before the tens of seconds it takes.
+    """
+    from . import config as _cfg
+    from . import context as _ctx
+    if not config.get("llama_ctx"):
+        return 0                       # window unknown: let the server decide
+    size = _ctx.estimate_tokens(state.messages, state.system)
+    if size <= _cfg.history_budget(config, schemas):
+        return 0
+    # Do not re-run a compaction that already could not reach the budget: see
+    # the note in _compact_if_needed. Wait until the history has genuinely
+    # grown past the level achieved last time.
+    if state.compact_floor and size < state.compact_floor * 1.15:
+        return 0
+    return size
+
+
 def _compact_if_needed(state: State, config: dict, schemas: list[dict] | None = None) -> int:
     """Keep the conversation inside the window. Returns tokens reclaimed.
 
@@ -270,13 +301,9 @@ def _compact_if_needed(state: State, config: dict, schemas: list[dict] | None = 
     """
     from . import config as _cfg
     from . import context as _ctx
-    if not config.get("llama_ctx"):
-        return 0                       # window unknown: let the server decide
-
-    budget = _cfg.history_budget(config, schemas)
-    size = _ctx.estimate_tokens(state.messages, state.system)
-    if size <= budget:
+    if not (size := _compaction_due(state, config, schemas)):
         return 0
+    budget = _cfg.history_budget(config, schemas)
 
     # Do not re-run a compaction that has already been tried and could not
     # reach the budget.
@@ -291,8 +318,6 @@ def _compact_if_needed(state: State, config: dict, schemas: list[dict] | None = 
     #
     # So remember the level actually achieved and wait until the history has
     # genuinely grown past it before trying again.
-    if state.compact_floor and size < state.compact_floor * 1.15:
-        return 0
 
     # One mechanism: the model writes a note and the old exchanges are replaced
     # by it. Nothing is elided — there are no markers standing in for content
@@ -395,8 +420,12 @@ def run(
         # benchmark task: 21,352 tokens against a 16,384-token window, returned
         # as a 400 that killed the run. Nothing had checked the budget since the
         # turn began.
-        if (freed := _compact_if_needed(state, config, schemas)):
-            yield Notice(f"compacted mid-turn: reclaimed ~{freed} tokens")
+        if (due := _compaction_due(state, config, schemas)):
+            yield Compacting(due)
+            t0 = _time.monotonic()
+            if (freed := _compact_if_needed(state, config, schemas)):
+                yield Notice(f"compacted: reclaimed ~{freed:,} tokens "
+                             f"in {_time.monotonic() - t0:.0f}s")
 
         turn: AssistantTurn | None = None
         # Warn only near the end: a budget mentioned every turn is noise, and
@@ -456,7 +485,7 @@ def run(
         # count and order must match the assistant's tool_calls exactly.
         for tc in valid:
             name, params = tc["name"], tc["input"]
-            yield ToolStart(name, params)
+            yield ToolStart(name, params, used_turns + 1, max_turns)
 
             denied = False
             if name in tools.MUTATING:

@@ -201,3 +201,20 @@ def restore(cfg: dict, session_id: str, ref: str) -> str:
     if r.returncode != 0:
         return f"Could not restore {ref}: {r.stderr.strip()[:200]}"
     return f"Working tree restored to {ref}."
+
+
+def baseline(cfg: dict, session_id: str) -> str:
+    """The first checkpoint of the session — the tree before any change."""
+    if not available():
+        return ""
+    r = _git(cfg, session_id, "rev-list", "--max-parents=0", "HEAD", timeout=20)
+    return r.stdout.split()[0] if r and r.returncode == 0 and r.stdout.split() else ""
+
+
+def diff(cfg: dict, session_id: str, ref: str) -> str:
+    """Everything that changed since `ref`, as a unified diff."""
+    if not available():
+        return ""
+    r = _git(cfg, session_id, "diff", "--no-color", "--no-ext-diff", ref, timeout=60)
+    return r.stdout if r and r.returncode == 0 else ""
+

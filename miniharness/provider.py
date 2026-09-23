@@ -773,8 +773,14 @@ def stream(
         # has nothing to calibrate against and silently keeps its own bad guess
         # (context.estimate_tokens). Costs one small final SSE frame.
         "stream_options": {"include_usage": True},
-        "temperature": config.get("temperature", 0.3),
     }
+    # Sampling is sent only when someone chose it: the user, in config, or a
+    # mechanical call such as the summariser, which sets temperature 0.0 for
+    # itself. Otherwise the server's defaults apply, and for a local model
+    # those are the model card's own (server.sampling_args).
+    for key in _cfg.SAMPLING_KEYS:
+        if config.get(key) not in (None, ""):
+            payload[key] = config[key]
     if "reply_share" in config:
         # Sent only when a caller asks for it. The agent's own turns do not:
         # a generation cap is the harness's constraint, not the model's, and
