@@ -757,6 +757,41 @@ turn N's reasoning is present in request N+1. Both encodings that fail above are
 accepted by the server without error, so any test that only checks the request
 was built and the call succeeded passes while the model sees nothing.
 
+### 3.3.1 …and then the map undid it, on every request
+
+§3.3 put the model's reasoning back into the request, and the stored history
+showed it there. The model still could not see it. The harness appended its
+own notes — the repository map, the working set, the rounds left — after the
+last tool result **as a user message**, and chat templates decide which
+reasoning to render by the last user message. Qwen3.5's renders an assistant
+step's `reasoning_content` only if the step comes after the last real user
+query:
+
+    {%- if loop.index0 > ns.last_query_index %}   <think>…</think> + content
+    {%- else %}                                     content only
+
+The map was that query. So on every request of a multi-step task, the
+template dropped the reasoning of every earlier step. Rendered through the
+model's own template via `/apply-template`: reasoning visible in the history
+as stored, absent from the request as sent. Nothing in the harness could see
+this — the history was intact, the estimator's count was consistent with the
+(wrong) render, and the tests checked the stored messages.
+
+It matches what a day of live runs showed: a model that re-decided fixes it
+had already made, re-read the same thirty lines six times, and pasted the
+reference expression back to itself twenty-five times.
+
+The notes now go on the end of the last tool result, as a copy. A tool result
+is not a query to any template, so reasoning within the task survives. At the
+start of a task the last message is the user's own and there is no reasoning
+yet to lose. Across tasks the template still drops it, which is what Qwen
+documents and what §3.3's measurement assumed.
+
+Two rarer injections remain as user messages because nothing else is valid
+after an assistant turn: the truncation and empty-turn nudges, and the
+continuation and landing requests. Each costs the earlier steps' reasoning for
+the requests that follow it — a known edge, not the per-request loss.
+
 ### 3.4 A cap spent entirely on thinking
 
 If the whole cap goes inside `<think>`, there is no visible text to resume from.

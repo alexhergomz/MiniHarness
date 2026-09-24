@@ -186,3 +186,24 @@ def test_the_map_lists_files_nobody_has_committed_yet(tmp_path):
 
     files = set(repomap.list_files(str(tmp_path)))
     assert files == {"spec.md", "pkg/value.py"}, files
+
+
+def test_mid_task_notes_do_not_become_a_new_user_query(repo):
+    """Chat templates keep an assistant step's reasoning only if it comes after
+    the last real user query. The map and working set used to follow the last
+    tool result as a user message of their own — a new "query" — so every
+    request dropped the model's reasoning for every earlier step of the task.
+    Verified against Qwen3.5's own template: visible as stored, gone as sent."""
+    msgs = [{"role": "user", "content": "fix verify_token"},
+            {"role": "assistant", "content": "", "reasoning_content": "why I read it",
+             "tool_calls": [{"id": "c1", "type": "function",
+                             "function": {"name": "Read", "arguments": "{}"}}]},
+            {"role": "tool", "tool_call_id": "c1", "content": "def verify_token(): ..."}]
+    req = loop._with_tail(msgs, {"_cwd": str(repo), "repo_map": True, "llama_ctx": 65536},
+                          None, turns_left=2)
+    last_user = max(i for i, m in enumerate(req) if m["role"] == "user")
+    assert req[last_user]["content"] == "fix verify_token", "a note became the last query"
+    assert req[-1]["role"] == "tool" and "tool round(s) remain" in req[-1]["content"]
+    assert msgs[-1]["content"] == "def verify_token(): ...", "stored history was modified"
+    # And the estimate counts the reasoning, because the model now sees it.
+    assert context.raw_chars(req) > context.raw_chars(req[:1] + [dict(req[1], reasoning_content="")] + req[2:])

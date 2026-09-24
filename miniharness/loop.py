@@ -191,6 +191,32 @@ def _handle_empty_turn(turn: AssistantTurn, msg: dict, state: State,
             "make progress, or state your final answer directly.")
 
 
+def _attach(messages: list[dict], text: str) -> list[dict]:
+    """Add harness text to the end of a request without starting a new query.
+
+    Mid-task the request ends with a tool result. The harness's notes — the
+    repository map, the working set, the rounds left — used to follow it as a
+    user message of their own. But chat templates decide which reasoning to
+    keep by the *last user message*: Qwen3.5's renders an assistant step's
+    reasoning only if it comes after the last real user query, and a note sent
+    as a user message is one. So every request dropped the model's reasoning
+    for every earlier step of the task it was in the middle of. Verified by
+    rendering through the model's own template: reasoning visible as stored,
+    gone as sent. It undid §3.3 — the model re-decided fixes it had already
+    made — while the stored history looked perfectly intact.
+
+    A tool result is not a query to any template, so the note goes on the end
+    of it — as a copy; the stored message is never touched. At the start of a
+    task, where the last message is the user's own, there is no reasoning yet
+    to lose and a separate message is harmless.
+    """
+    last = messages[-1] if messages else None
+    if last is not None and last.get("role") == "tool":
+        body = str(last.get("content") or "")
+        return messages[:-1] + [dict(last, content=f"{body}\n\n{text}")]
+    return messages + [{"role": "user", "content": text}]
+
+
 def _with_tail(messages: list[dict], config: dict, tracker,
                turns_left: int | None = None, state_ref=None) -> list[dict]:
     """Everything appended to the request but never stored: map, then budget.
@@ -211,11 +237,7 @@ def _with_tail(messages: list[dict], config: dict, tracker,
         from . import context as _ctx2
         if (ws := _ctx2.working_set(
                 messages, ledger=getattr(state_ref, "ledger", None))):
-            if out is messages:
-                out = messages + [{"role": "user", "content": ws}]
-            else:
-                out = out[:-1] + [{"role": "user",
-                                   "content": out[-1]["content"] + "\n\n" + ws}]
+            out = _extend_tail(out, messages, ws)
 
     if turns_left is not None and out and out[-1].get("role") != "assistant":
         # Tell the model how much room it has left.
@@ -228,12 +250,17 @@ def _with_tail(messages: list[dict], config: dict, tracker,
         # working against the model rather than with it.
         note = (f"[{turns_left} tool round(s) remain for this task. "
                 f"Prioritise finishing over exploring further.]")
-        if out is messages:
-            out = messages + [{"role": "user", "content": note}]
-        else:
-            out = out[:-1] + [{"role": "user",
-                               "content": out[-1]["content"] + "\n\n" + note}]
+        out = _extend_tail(out, messages, note)
     return out
+
+
+def _extend_tail(out: list[dict], messages: list[dict], text: str) -> list[dict]:
+    """Add `text` to the request's tail: to what the harness already appended
+    this request if anything, otherwise via _attach."""
+    if out is messages:
+        return _attach(messages, text)
+    last = out[-1]
+    return out[:-1] + [dict(last, content=f"{last.get('content') or ''}\n\n{text}")]
 
 
 def _with_focus_map(messages: list[dict], config: dict, tracker) -> list[dict]:
@@ -253,11 +280,8 @@ def _with_focus_map(messages: list[dict], config: dict, tracker) -> list[dict]:
     body = _ctx.focus_map(config, messages, tracker)
     if not body:
         return messages
-    return messages + [{
-        "role": "user",
-        "content": ("[repository map — generated now for this request, "
-                    "reflects the current state of the files]\n\n" + body),
-    }]
+    return _attach(messages, "[repository map — generated now for this request, "
+                             "reflects the current state of the files]\n\n" + body)
 
 
 def _compaction_due(state: State, config: dict, schemas: list[dict] | None = None) -> int:
