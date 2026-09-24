@@ -56,6 +56,13 @@ uses, and counted as read so the first call can be the edit), and `!command`
 runs a shell command yourself — its output goes along with your next message.
 Tab completes `/commands` and `@paths`.
 
+Every session also writes a plain-text log beside it —
+`~/.miniharness/sessions/<id>.log`, shown at startup and by `/log`. It has what
+the screen shows plus the model's reasoning, which the screen reduces to a
+counter, and it is flushed line by line: `tail -f` it from another terminal to
+follow a run, or read it afterwards to see why a turn went the way it did.
+`/config transcript=false` turns it off.
+
 **What a turn looks like.** Each tool call is one line; a change is shown as a
 line-numbered diff with the edited words marked, whether or not anything asked
 first. A command's line is its verdict (`4 passed in 0.12s`), not its progress

@@ -153,6 +153,7 @@ DEFAULTS: dict[str, Any] = {
     # (see provider.ThinkFilter); this only controls whether it streams to the
     # screen. Hidden by default — "/think" expands the last one either way.
     "show_thinking": False,
+    "transcript": True,              # plain-text log of each session, beside it
 
     # ── Context ─────────────────────────────────────────────────────────────
     # ── Everything below is a SHARE of the context window ───────────────────

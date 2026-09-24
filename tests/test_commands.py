@@ -489,3 +489,32 @@ def test_the_approval_menu_without_a_terminal_takes_a_number(monkeypatch):
     for typed, want in (("", 0), ("2", 1), ("3", 2), ("y", 0), ("a", 1), ("nope", 2)):
         monkeypatch.setattr(m.console, "input", lambda *a, _t=typed, **k: _t)
         assert m._choose_by_number("Allow?", ["Yes", "Always", "No"], cancel=2) == want
+
+
+def test_the_session_log_has_what_the_screen_showed_and_what_it_hid(
+        tmp_path, monkeypatch):
+    """A terminal cannot be read from outside it; during a runaway the only
+    thing visible elsewhere was the server's token count. The log has the
+    screen's text, plus the reasoning the screen reduces to a counter."""
+    from miniharness import __main__ as m
+    from miniharness import loop, session
+    from miniharness.provider import AssistantTurn, TextChunk, ThinkChunk
+
+    monkeypatch.setattr(session, "SESSIONS", tmp_path)
+    monkeypatch.setattr(m, "TRANSCRIPT", m.Transcript())
+    m.TRANSCRIPT.open("s1")
+
+    def fake(*a, **k):
+        yield ThinkChunk("the divisor [n - 1] is wrong")
+        yield TextChunk("Fixed it.")
+        yield AssistantTurn(text="Fixed it.", finish_reason="stop")
+
+    monkeypatch.setattr(loop, "stream_complete", fake)
+    state = loop.State(messages=[{"role": "user", "content": "fix"}])
+    m.run_turn(state, {"model": "local", "_cwd": str(tmp_path)}, None)
+    m.TRANSCRIPT.close()
+
+    text = (tmp_path / "s1.log").read_text()
+    assert "the divisor [n - 1] is wrong" in text, "hidden reasoning not logged"
+    assert "Fixed it." in text and "thought for" in text and "✓" in text
+    assert "\x1b" not in text, "colour codes in a plain-text log"

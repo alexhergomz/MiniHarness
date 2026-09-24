@@ -19,7 +19,94 @@ from rich.text import Text
 from . import config as cfg_mod
 from . import checkpoint, context, loop, models, preview, research, server, session, tools
 
-console = Console()
+class Transcript:
+    """Everything shown on screen, as plain text, in a file beside the session.
+
+    The terminal is the only place a run could be seen, and a terminal cannot
+    be read from outside it: during a runaway, all that was visible elsewhere
+    was the server's token count, never what the model was writing. The model's
+    reasoning goes here too, although the screen only shows a counter for it,
+    because that is exactly what is needed to tell hard work from circling.
+
+    Line-buffered and flushed on every write, so `tail -f` shows a run as it
+    happens. Never raises: losing a log line must not take down a turn.
+    """
+
+    def __init__(self):
+        self.path: pathlib.Path | None = None
+        self._file = None
+        self._console: Console | None = None
+
+    def open(self, session_id: str) -> None:
+        path = session.SESSIONS / f"{session_id}.log"
+        if path == self.path:
+            return
+        self.close()
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self._file = open(path, "a", encoding="utf-8", buffering=1)
+        except OSError:
+            return
+        self.path = path
+        # No colour, no terminal: plain text a person or a script can read.
+        self._console = Console(file=self._file, width=200, color_system=None,
+                                force_terminal=False, highlight=False)
+        self.raw(f"\n=== {_time.strftime('%Y-%m-%d %H:%M:%S')} · session "
+                 f"{session_id} ===\n")
+
+    def print(self, *args, **kwargs) -> None:
+        if self._console is None:
+            return
+        try:
+            self._console.print(*args, **kwargs)
+            self._file.flush()
+        except Exception:
+            pass
+
+    def raw(self, text: str) -> None:
+        if self._file is None:
+            return
+        try:
+            self._file.write(text)
+            self._file.flush()
+        except Exception:
+            pass
+
+    def close(self) -> None:
+        if self._file is not None:
+            try:
+                self._file.close()
+            except OSError:
+                pass
+        self.path = self._file = self._console = None
+
+
+TRANSCRIPT = Transcript()
+
+
+class _TeeConsole:
+    """The screen's console, with every print and every answer also sent to
+    the transcript. Everything else — status lines, the pager, the size —
+    is the real console's, unchanged."""
+
+    def __init__(self, real: Console):
+        self._real = real
+
+    def print(self, *args, **kwargs) -> None:
+        self._real.print(*args, **kwargs)
+        TRANSCRIPT.print(*args, **kwargs)
+
+    def input(self, prompt: str = "", **kwargs) -> str:
+        answer = self._real.input(prompt, **kwargs)
+        TRANSCRIPT.print(prompt, end="")
+        TRANSCRIPT.raw(answer + "\n")
+        return answer
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+console = _TeeConsole(Console())
 
 HELP = """\
 [bold]Commands[/bold]
@@ -36,6 +123,7 @@ HELP = """\
   /rewind [-n|sha]      restore the working tree to a checkpoint
   /clear                start a fresh conversation (files are left as they are)
   /resume [id]          resume a previous session (default: the most recent)
+  /log                  where this session's plain-text log is
   /research <question>  spawn a bounded research run; writes a markdown report
   /quit                 exit
 
@@ -256,6 +344,7 @@ def choose(question: str, options: list[str], cancel: int) -> int:
                 draw(False)
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+    TRANSCRIPT.raw(f"  {question} → {options[current]}\n")
     return current
 
 
@@ -398,6 +487,7 @@ def run_turn(state: loop.State, config: dict, tracker) -> None:
             console.print()
             return
         spent = _time.monotonic() - think_start
+        TRANSCRIPT.raw("\n── end of thinking ──\n")
         console.print(f"✻ thought for {spent:.0f}s · ~{think_bytes // 4:,} tokens",
                       style="dim", highlight=False, markup=False)
 
@@ -448,6 +538,11 @@ def run_turn(state: loop.State, config: dict, tracker) -> None:
                     console.print(event.text, end="", style="dim",
                                   markup=False, highlight=False)
                 else:
+                    # Hidden on screen, kept in the log: the text is what tells
+                    # a model working hard from one going round in circles.
+                    if think_bytes == len(event.text):
+                        TRANSCRIPT.raw("── thinking ──\n")
+                    TRANSCRIPT.raw(event.text)
                     # A static "thinking…" is indistinguishable from a hang, and
                     # was twice diagnosed as one, so it counts up. It runs on
                     # the live status line: this used to print "\r" + text,
@@ -836,8 +931,17 @@ def handle_command(line: str, state: loop.State, config: dict, tracker) -> bool:
         if tracker is not None:
             tracker._read.clear()
         _PENDING_SHELL.clear()
+        if TRANSCRIPT.path:
+            TRANSCRIPT.open(state.session_id)
         console.print(f"Started a new conversation. The last one is kept: "
                       f"[bold]/resume {old_id}[/bold]")
+
+    elif cmd == "/log":
+        if TRANSCRIPT.path:
+            console.print(f"This session's log: [bold]{escape(str(TRANSCRIPT.path))}[/bold]\n"
+                          f"[dim]tail -f it to follow a run from another terminal.[/dim]")
+        else:
+            console.print("No log for this session (/config transcript=true, then restart).")
 
     elif cmd == "/checkpoints":
         rows = checkpoint.history(config, state.session_id)
@@ -900,6 +1004,8 @@ def handle_command(line: str, state: loop.State, config: dict, tracker) -> bool:
             return True
         state.messages = records[-1].get("messages", [])
         state.session_id = sid
+        if TRANSCRIPT.path:
+            TRANSCRIPT.open(sid)
         if tracker is not None:
             fresh = context.FileTracker.from_messages(state.messages,
                                                       config.get("_cwd"))
@@ -988,6 +1094,10 @@ def main(argv=None) -> int:
             note = _repair_note(state)
             console.print(f"[dim]resumed {sid} ({len(state.messages)} messages){note}[/dim]")
 
+    if config.get("transcript", True):
+        TRANSCRIPT.open(state.session_id)
+        TRANSCRIPT.raw(f"model {config['model']} · {config['_cwd']}\n")
+
     # Get the stable prefix into the KV cache before the first real turn.
     if (status := server.warm_prefix(config, state.system, tools.schemas_for(config))):
         console.print(f"[dim]{status}[/dim]")
@@ -1002,12 +1112,15 @@ def main(argv=None) -> int:
             console.print(f"[dim]{msg}[/dim]")
 
     if args.prompt:
+        TRANSCRIPT.raw(f"\n[{_time.strftime('%H:%M:%S')}] > {args.prompt}\n")
         state.add_user(compose_message(args.prompt, config, tracker))
         run_turn(state, config, tracker)
         return 0
 
     console.print(f"[bold]MiniHarness[/bold] [dim]{config['model']} · "
                   f"{config['_cwd']}[/dim]  —  /help")
+    if TRANSCRIPT.path:
+        console.print(f"[dim]log: {escape(str(TRANSCRIPT.path))}[/dim]", highlight=False)
 
     try:
         from prompt_toolkit import PromptSession
@@ -1027,6 +1140,9 @@ def main(argv=None) -> int:
             break
         if not line:
             continue
+        # The prompt is drawn by prompt_toolkit, not by the console, so what
+        # was typed has to be recorded by hand.
+        TRANSCRIPT.raw(f"\n[{_time.strftime('%H:%M:%S')}] > {line}\n")
         if line.startswith("/"):
             if not handle_command(line, state, config, tracker):
                 break
@@ -1038,6 +1154,7 @@ def main(argv=None) -> int:
         state.add_user(compose_message(line, config, tracker))
         run_turn(state, config, tracker)
 
+    TRANSCRIPT.close()
     server.stop()
     return 0
 
