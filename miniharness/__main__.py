@@ -480,8 +480,12 @@ def _context_note(state: loop.State, config: dict) -> str:
     return f"context {100 * used / size:.0f}% of {size / 1024:.0f}k"
 
 
-def run_turn(state: loop.State, config: dict, tracker) -> None:
-    """Run one user message to completion, rendering events as they arrive."""
+def run_turn(state: loop.State, config: dict, tracker) -> bool:
+    """Run one user message to completion, rendering events as they arrive.
+
+    Returns False when the turn was cut short by an error or an interrupt, so
+    one-shot mode can say so in its exit code.
+    """
     status = None                       # a live spinner, while something runs
 
     def stop_status():
@@ -528,6 +532,7 @@ def run_turn(state: loop.State, config: dict, tracker) -> None:
     think_bytes = 0
     show_think = bool(config.get("show_thinking"))
     turn_start = _time.monotonic()
+    completed = True
     calls = rounds = 0
     changed: dict[str, None] = {}           # ordered set of files written
     pending: dict[int, tuple] = {}          # id(params) -> (path, before, t0)
@@ -665,6 +670,7 @@ def run_turn(state: loop.State, config: dict, tracker) -> None:
     except KeyboardInterrupt:
         end_thinking()
         stop_status()
+        completed = False
         console.print("\n[yellow]interrupted[/yellow]")
         # Keep history well-formed: a dangling assistant tool_call with no tool
         # response is a guaranteed 400 on the next request.
@@ -674,7 +680,7 @@ def run_turn(state: loop.State, config: dict, tracker) -> None:
     except Exception as e:
         stop_status()
         console.print(f"[red]{type(e).__name__}: {escape(str(e))}[/red]")
-        return
+        return False
     finally:
         end_thinking()
         stop_status()
@@ -716,6 +722,7 @@ def run_turn(state: loop.State, config: dict, tracker) -> None:
     console.print(f"[dim]✓ {' · '.join(parts)}[/dim]", highlight=False)
     if changed:
         console.print("[dim]  /diff to review · /rewind to undo[/dim]", highlight=False)
+    return completed
 
 
 def show_unified(stat: str, text: str, title: str) -> None:
@@ -1172,8 +1179,10 @@ def main(argv=None) -> int:
     if args.prompt:
         TRANSCRIPT.raw(f"\n[{_time.strftime('%H:%M:%S')}] > {args.prompt}\n")
         state.add_user(compose_message(args.prompt, config, tracker))
-        run_turn(state, config, tracker)
-        return 0
+        # A turn that died on an error exited 0, so a script — or a monitor —
+        # read a crash as success. Watched: a run killed by a suspended
+        # laptop reported "exit 0".
+        return 0 if run_turn(state, config, tracker) else 1
 
     console.print(f"[bold]MiniHarness[/bold] [dim]{config['model']} · "
                   f"{config['_cwd']}[/dim]  —  /help")

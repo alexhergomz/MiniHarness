@@ -543,3 +543,20 @@ def test_thinking_time_stops_when_the_reasoning_does(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "thought for 1s" in out or "thought for 2s" in out, out
     assert "thought for 5" not in out
+
+
+def test_a_turn_that_dies_on_an_error_reports_it(monkeypatch):
+    """One-shot mode exited 0 after a turn died on an error, so a script read
+    a crash as success. Watched: a run killed by a suspended laptop."""
+    from miniharness import __main__ as m
+    from miniharness import loop
+
+    def boom(*a, **k):
+        raise RuntimeError("could not reach the server")
+        yield  # pragma: no cover
+    monkeypatch.setattr(loop, "run", boom)
+    st = loop.State(messages=[{"role": "user", "content": "go"}])
+    assert m.run_turn(st, {"model": "local"}, None) is False
+
+    monkeypatch.setattr(loop, "run", lambda *a, **k: iter([]))
+    assert m.run_turn(st, {"model": "local"}, None) is True
