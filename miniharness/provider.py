@@ -517,6 +517,7 @@ class _Deliberation:
     CHECK_EVERY = 2000
     MIN_DISTINCT = 0.40      # measured: 0.019 looping, 0.41 paraphrasing, 0.72+ healthy
     WINDOW = 12000           # characters — the last ~3,000 tokens
+    MAX_COMPRESSION = 0.08   # measured: healthy 0.24-0.43, loops 0.003-0.022
 
     # Measured with the model's own tokenizer on 268,089 characters of its
     # reasoning: 70,611 tokens. Python source runs 4.06.
@@ -564,6 +565,22 @@ class _Deliberation:
         # 0.20 by phrase. It had decided the same fix 38 times without making
         # it. Over a window, that trips at ~7,000 tokens instead of never.
         recent = "".join(self._buf)[-self.WINDOW:]
+        # How well the recent reasoning compresses, independent of lines and
+        # words. Watched on a live build: the model quoted a traceback's caret
+        # line and wrote ~100,000 "^" on a single line for eighteen minutes.
+        # That is one line (below the line count below) and one "word" (no
+        # 8-word phrases at all), so both ratios were blind to the simplest
+        # loop there is. zlib is not: varied text shrinks to 0.24-0.43 of its
+        # size (measured over this repository's code and prose, and the
+        # model's healthy reasoning), a circling runaway to 0.022, the caret
+        # line to 0.003. 0.08 leaves a wide margin either side.
+        import zlib
+        raw = recent.encode("utf-8", "replace")
+        packed = len(zlib.compress(raw, 6)) / max(1, len(raw))
+        if packed < self.MAX_COMPRESSION:
+            return (f"reasoning stopped progressing — the last "
+                    f"{int(len(recent) / self.CHARS_PER_TOKEN):,} tokens compress "
+                    f"{1 / max(packed, 1e-6):.0f}× (varied text: about 3×)")
         lines = [l.strip() for l in recent.splitlines() if l.strip()]
         if len(lines) < 20:
             return None

@@ -431,6 +431,22 @@ def _tool_detail(name: str, params: dict, config: dict) -> str:
                or params.get("url") or params.get("query") or "")
 
 
+# What the harness adds to a tool result for the model — hints, "the suite got
+# worse", streak notes. They sit at the end of a result, and only a result's
+# headline reaches the screen, so the person the last hint is partly *for*
+# never saw any of them. Watched on a live run: the monitor could not tell
+# whether a hint had fired.
+_NOTE_PREFIXES = ("[hint:", "[the suite got worse", "[the suite is green",
+                  "[you have read this file", "[this is ")
+
+
+def _show_notes(result: str) -> None:
+    for line in (result or "").splitlines()[-6:]:
+        line = line.strip()
+        if line.startswith(_NOTE_PREFIXES):
+            console.print(f"     {line}", style="yellow", markup=False, highlight=False)
+
+
 def _result_line(name: str, result: str) -> tuple[str, int]:
     """The one line of a result worth showing, and how many lines there were.
 
@@ -625,6 +641,7 @@ def run_turn(state: loop.State, config: dict, tracker) -> None:
                 console.print(f"  ⎿  {head[:140]}{more}{took}",
                               style="red" if failed else "dim",
                               markup=False, highlight=False)
+                _show_notes(event.result)
             elif kind == "Compacting":
                 if streaming:
                     console.print()

@@ -968,3 +968,14 @@ def test_a_tool_call_being_written_reports_progress_and_is_not_the_turn(monkeypa
     turns = [e for e in events if isinstance(e, AssistantTurn)]
     assert [d.chars for d in drafts] == [400, 800]
     assert len(turns) == 1 and turns[0].tool_calls[0]["name"] == "Write"
+
+
+def test_a_single_line_repeated_forever_is_caught():
+    """Watched live: ~100,000 "^" on one line, quoted from a traceback, for
+    eighteen minutes. One line and one "word", so the line and phrase ratios
+    never looked at it; only the 32k length backstop ended it."""
+    from miniharness.provider import _Deliberation
+    d = _Deliberation({"llama_ctx": 65536})
+    text = "The error points here:\n    return Value(0.0, (self), 'neg')\n    " + "^" * 200000
+    fired = next((i for i in range(0, len(text), 300) if d.feed(text[i:i + 300])), None)
+    assert fired is not None and fired < 40000, fired
