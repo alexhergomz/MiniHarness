@@ -2261,7 +2261,7 @@ def test_the_same_failure_brings_escalating_hints(tmp_path):
     outs = [tools.dispatch("Bash", {"command": fail}, cfg, None) for _ in range(7)]
     hinted = [i + 1 for i, o in enumerate(outs) if "[hint:" in o]
     assert hinted == [3, 5, 7], hinted
-    assert "what the failing check" in outs[2]
+    assert "what the check" in outs[2]
     assert "WebSearch" in outs[4]
     assert "Report to the user" in outs[6]
     assert tools.struggle_level() == 3
@@ -2288,3 +2288,25 @@ def test_a_note_survives_a_long_test_run(tmp_path):
     outs = [tools.dispatch("Bash", {"command": long_fail}, cfg, None) for _ in range(3)]
     assert "truncated" in outs[2]
     assert outs[2].rstrip().endswith("the gap between those two is the bug.]")
+
+
+def test_an_unchanged_result_after_edits_counts_as_stuck(tmp_path):
+    """Watched live: seven `python3 -c` probes printing "Expected: a.grad =
+    2.0" and exiting 0, with the code edited between each — no hint, because
+    only failures counted. Repeating a command without editing is not stuck."""
+    from miniharness import tools
+    cfg = {"_cwd": str(tmp_path)}
+    (tmp_path / "v.py").write_text("x = 1\n")
+    tools._READ_STREAK.clear()
+    probe = {"command": "python3 -c \"print('Expected: a.grad = 2.0, got 1.0')\""}
+    tools.new_turn()
+    outs = []
+    for i in range(5):
+        tools.dispatch("Write", {"file_path": "v.py", "content": f"x = {i}\n", "append": True},
+                       cfg, None)
+        outs.append(tools.dispatch("Bash", probe, cfg, None))
+    assert "[hint:" in outs[2] and "WebSearch" in outs[4]
+
+    tools.new_turn()                              # no edits: never a hint
+    assert not any("[hint:" in tools.dispatch("Bash", {"command": "ls"}, cfg, None)
+                   for _ in range(8))

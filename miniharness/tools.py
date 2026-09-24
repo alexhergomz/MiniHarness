@@ -730,6 +730,8 @@ def note_other_tool_use(name: str) -> None:
         _WRITE_STREAK.clear()
     if name in MUTATING:
         _READ_STREAK.clear()
+    if name in ("Write", "Edit"):
+        _FAIL_STREAK["edited"] = True
 
 
 # path -> (reads since anything was changed or run, file content hash)
@@ -1049,7 +1051,7 @@ def _test_regression(out: str, cfg: dict) -> str:
 
 # ── Hints when the same failure keeps coming back ───────────────────────────
 # Within one turn: the failure most recently seen, and how many times running.
-_FAIL_STREAK: dict[str, object] = {"sig": "", "count": 0, "told": 0}
+_FAIL_STREAK: dict[str, object] = {"sig": "", "count": 0, "told": 0, "edited": False}
 # Bounded: an unbounded \w+ ahead of "Error" backtracks at every position of a
 # long line, which is quadratic — a 200,000-character line of minified output
 # took minutes of CPU. Exception names are short, and only line tails are read.
@@ -1058,7 +1060,7 @@ _FAIL_LINE = re.compile(r"(\b\w{1,64}(?:Error|Exception)\b.*|FAILED .*|assert .*
 
 def new_turn() -> None:
     """A new message from the user: hints start over."""
-    _FAIL_STREAK.update(sig="", count=0, told=0)
+    _FAIL_STREAK.update(sig="", count=0, told=0, edited=False)
 
 
 def struggle_level() -> int:
@@ -1093,21 +1095,35 @@ def _struggle(out: str, returncode: int) -> str:
     the result that triggered it, never sent as a user message of its own
     (§3.3.1), and a different failure — which is progress — starts over.
     """
+    edited = bool(_FAIL_STREAK["edited"])
+    _FAIL_STREAK["edited"] = False
     if returncode == 0:
-        _FAIL_STREAK.update(sig="", count=0)
-        return ""
-    sig = _failure_signature(out)
-    if not sig:
-        return ""
-    if sig == _FAIL_STREAK["sig"]:
+        # A command that "succeeds" can be just as stuck. Watched live: the
+        # model probed with `python3 -c` scripts that printed "Expected:
+        # a.grad = 2.0" and exited 0, seven times, editing the code between
+        # each — and no hint fired, because only failures were counted. The
+        # signal is the code changing while the result does not. Without an
+        # edit in between, an unchanged result means nothing (`ls` twice).
+        tail = [l.strip() for l in out.splitlines()
+                if l.strip() and not l.startswith("[exit")][-3:]
+        sig = " / ".join(tail)[:200]
+        if not sig or not edited or sig != _FAIL_STREAK["sig"]:
+            _FAIL_STREAK.update(sig=sig, count=1 if edited else 0)
+            return ""
         _FAIL_STREAK["count"] = int(_FAIL_STREAK["count"]) + 1
     else:
-        _FAIL_STREAK.update(sig=sig, count=1)
+        sig = _failure_signature(out)
+        if not sig:
+            return ""
+        if sig == _FAIL_STREAK["sig"]:
+            _FAIL_STREAK["count"] = int(_FAIL_STREAK["count"]) + 1
+        else:
+            _FAIL_STREAK.update(sig=sig, count=1)
     n = int(_FAIL_STREAK["count"])
     if n == 3:
         _FAIL_STREAK["told"] = max(1, int(_FAIL_STREAK["told"]))
         return (f"\n[hint: this is the 3rd run in a row ending in `{sig}`. Before "
-                f"editing again, write one line saying what the failing check "
+                f"editing again, write one line saying what the check "
                 f"expects and what your code does instead — the gap between those "
                 f"two is the bug.]")
     if n == 5:
