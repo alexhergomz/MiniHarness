@@ -1053,6 +1053,27 @@ def handle_command(line: str, state: loop.State, config: dict, tracker) -> bool:
 
 
 # ── Entry point ─────────────────────────────────────────────────────────────
+def _install_exit_handlers() -> None:
+    """Stop the server and close the log however the harness ends.
+
+    SIGTERM (a timeout, `kill`) and SIGHUP (closing the terminal) used to end
+    the process without running any cleanup, and one-shot `-p` mode returned
+    before the cleanup line even on success — each leaving llama-server
+    running with the GPU. Turning both signals into an ordinary exit lets
+    atexit do the same work a /quit does.
+    """
+    import atexit
+    import signal
+    atexit.register(server.stop)
+    atexit.register(TRANSCRIPT.close)
+    for sig in (signal.SIGTERM, getattr(signal, "SIGHUP", None)):
+        if sig is not None:
+            try:
+                signal.signal(sig, lambda signum, frame: sys.exit(128 + signum))
+            except (ValueError, OSError):
+                pass          # not the main thread, or not supported here
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="miniharness",
                                  description="A minimal local-first coding agent")
@@ -1063,6 +1084,7 @@ def main(argv=None) -> int:
     ap.add_argument("--resume", nargs="?", const="", help="resume a session")
     ap.add_argument("--no-repo-map", action="store_true", help="omit the repo map")
     args = ap.parse_args(argv)
+    _install_exit_handlers()
 
     config = cfg_mod.load()
     config["_cwd"] = os.path.abspath(args.cwd)

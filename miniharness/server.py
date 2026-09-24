@@ -181,8 +181,16 @@ def start(config: dict, wait: float = 180.0) -> bool:
     HOME.mkdir(parents=True, exist_ok=True)
     try:
         log = open(LOG_PATH, "ab")
+        # Its own session, so Ctrl-C in the REPL interrupts a turn without
+        # killing the model. But then nothing ties it to the harness: when the
+        # harness was killed — a timeout's SIGTERM, a closed terminal's SIGHUP —
+        # the server lived on, holding the GPU, re-parented to init. Watched
+        # after a timed-out run: still up thirty minutes later. On Linux the
+        # kernel is told to send it SIGTERM the moment its parent goes, however
+        # the parent goes, including SIGKILL.
         _PROC = subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT,
-                                 start_new_session=True)
+                                 start_new_session=True,
+                                 preexec_fn=_die_with_parent)
     except FileNotFoundError:
         raise RuntimeError(
             f"{args[0]!r} not found. Install llama.cpp, or set the path with:\n"
@@ -232,6 +240,17 @@ def _explain_exit(config: dict) -> str:
             return f"llama-server failed to start: {hint}\n(full log: {LOG_PATH})"
     last = [ln for ln in tail.splitlines() if ln.strip()][-1:] or [""]
     return f"llama-server exited during startup: {last[0][:200]}\n(full log: {LOG_PATH})"
+
+
+def _die_with_parent() -> None:
+    """In the child, before exec: ask for SIGTERM when the parent dies. Linux."""
+    try:
+        import ctypes
+        import signal
+        PR_SET_PDEATHSIG = 1
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(PR_SET_PDEATHSIG, signal.SIGTERM)
+    except Exception:
+        pass          # not Linux: the harness's own exit handling still applies
 
 
 def stop() -> None:
