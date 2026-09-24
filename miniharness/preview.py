@@ -44,6 +44,9 @@ class Plan:
 
 def plan(name: str, params: dict, cfg: dict) -> Plan | None:
     """The change a Write/Edit/Bash call will make, or None for other tools."""
+    if "_stopped" in params:
+        return Plan(params.get("file_path", ""),
+                    verdict="will be REFUSED — this call was stopped while being written")
     try:
         if name == "Write":
             return _plan_write(params, cfg)

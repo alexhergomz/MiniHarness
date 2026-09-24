@@ -1022,3 +1022,54 @@ def test_a_busy_server_is_waited_for_not_given_up_on(monkeypatch):
     monkeypatch.setattr(provider, "BUSY_WAIT_LIMIT", 600.0)
     with pytest.raises(RuntimeError, match="could not reach"):
         run(["timeout"] * 50, lambda: True)
+
+
+def _streamed_write(content: str, closed: list):
+    """A fake SSE response streaming one Write call's arguments in pieces."""
+    import json as _json
+    args = _json.dumps({"file_path": "ember/value.py", "content": content})
+    chunks = [args[i:i + 200] for i in range(0, len(args), 200)]
+
+    class R:
+        status_code = 200
+        headers = {}
+        def iter_lines(self, decode_unicode=False):
+            first = True
+            for c in chunks:
+                tc = {"index": 0, "function": {"arguments": c}}
+                if first:
+                    tc.update(id="c1", function={"name": "Write", "arguments": c})
+                    first = False
+                yield "data: " + _json.dumps({"choices": [{"delta": {"tool_calls": [tc]}}]})
+            yield 'data: {"choices":[{"finish_reason":"tool_calls","delta":{}}]}'
+            yield "data: [DONE]"
+        def close(self): closed.append(True)
+    return R()
+
+
+def test_a_write_that_loops_is_stopped_while_it_streams(monkeypatch):
+    """Watched live: 27 minutes and ~57,000 tokens of generation with nothing
+    in the log — a tool call's arguments, which no circling check watched."""
+    from miniharness import provider, tools
+    closed = []
+    looping = "class Value:\n    def f(self):\n        return (self, (self, (self, " + "(self, " * 60000
+    monkeypatch.setattr(provider, "_connect", lambda *a, **k: _streamed_write(looping, closed))
+    cfg = {"llama_host": "h", "llama_port": 1, "model": "local", "llama_ctx": 65536}
+    events = list(provider.stream("local", "", [{"role": "user", "content": "go"}], [], cfg))
+    turn = events[-1]
+    call = turn.tool_calls[0]
+    assert turn.finish_reason == "stopped" and closed, "the generation was not cut off"
+    assert "_stopped" in call["input"] and call["input"]["file_path"] == "ember/value.py"
+    assert call["input"]["_chars"] < len(looping) // 4, "stopped far too late"
+    out = tools.dispatch("Write", call["input"], {"_cwd": "/tmp"}, None)
+    assert out.startswith("Error: this Write call for ember/value.py was stopped")
+
+
+def test_a_large_legitimate_write_is_not_stopped(monkeypatch):
+    import pathlib
+    from miniharness import provider
+    real = pathlib.Path("miniharness/tools.py").read_text()[:60000]
+    monkeypatch.setattr(provider, "_connect", lambda *a, **k: _streamed_write(real, []))
+    cfg = {"llama_host": "h", "llama_port": 1, "model": "local", "llama_ctx": 65536}
+    turn = list(provider.stream("local", "", [{"role": "user", "content": "go"}], [], cfg))[-1]
+    assert turn.tool_calls[0]["input"].get("content") == real

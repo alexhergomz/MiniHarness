@@ -17,6 +17,7 @@ away:
 from __future__ import annotations
 
 import json
+import re
 import threading as _threading
 import time as _time
 import os
@@ -855,6 +856,16 @@ def _assemble_tool_calls(acc: dict[int, dict[str, str]]) -> list[dict]:
         slot = acc[idx]
         if not slot["name"]:
             continue
+        if slot.get("stopped"):
+            # Kept as a real, well-formed call so the model gets an answer to
+            # it — why it was stopped — instead of it silently vanishing as
+            # "malformed". The tool refuses it; nothing is written or run.
+            args = {"_stopped": slot["stopped"], "_chars": len(slot["args"])}
+            if (m := re.search(r'"file_path"\s*:\s*"([^"]+)"', slot["args"])):
+                args["file_path"] = m.group(1)
+            out.append({"id": slot["id"] or f"call_{idx}", "name": slot["name"],
+                        "input": args})
+            continue
         try:
             args = json.loads(slot["args"]) if slot["args"].strip() else {}
         except json.JSONDecodeError:
@@ -932,6 +943,16 @@ def stream(
     think = ThinkFilter()
     # tool_calls arrive as deltas keyed by index; accumulate the argument string.
     acc: dict[int, dict[str, str]] = {}
+    # A tool call's arguments are watched like reasoning is. Writing a file
+    # streams its whole content as arguments, which produce no text and no
+    # reasoning — so every circling check was blind to them. Watched on a live
+    # build: 27 minutes and ~57,000 tokens of generation with nothing in the
+    # log, cancelled only by the run's time limit. Compression is the measure
+    # that works on file content (healthy code compresses ~3x, loops 15-300x);
+    # there is no length cap, because a large file is a legitimate thing to
+    # write.
+    arg_watch: dict[int, _Deliberation] = {}
+    stopped = False
 
     beat = _Heartbeat(config, "tokens from the model")
     beat.__enter__()
@@ -988,6 +1009,21 @@ def stream(
                     # Throttled: one event per ~400 characters written.
                     if before == 0 or len(slot["args"]) // 400 > before // 400:
                         yield ToolDraft(slot["name"], len(slot["args"]))
+                    watch = arg_watch.setdefault(
+                        idx, _Deliberation(dict(config, think_limit=10 ** 9)))
+                    if (why := watch.feed(fn["arguments"])):
+                        slot["stopped"] = why.replace("reasoning", "its content")
+                        stopped = True
+                        break
+            if stopped:
+                # Dropping the connection is what makes llama-server cancel the
+                # generation; otherwise it keeps its only slot busy writing.
+                try:
+                    resp.close()
+                except Exception:
+                    pass
+                turn.finish_reason = "stopped"
+                break
     except (requests.ConnectionError, requests.Timeout, requests.ChunkedEncodingError):
         # The connection dropped partway. Retrying is not safe — the user has
         # already seen whatever was streamed — so keep the partial turn and mark

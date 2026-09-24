@@ -514,7 +514,7 @@ def run(
             yield ToolStart(name, params, used_turns + 1, max_turns)
 
             denied, feedback = False, ""
-            if name in tools.MUTATING:
+            if name in tools.MUTATING and "_stopped" not in params:
                 # Before the call, not after: "the tree before the agent
                 # touched anything" cannot be reconstructed once it has.
                 checkpoint.ensure_baseline(config, state.session_id)

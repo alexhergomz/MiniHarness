@@ -1540,6 +1540,13 @@ def dispatch(name: str, params: dict, config: dict, tracker=None,
     note_other_tool_use(name)
     if "_raw" in params:
         return "Error: arguments were malformed JSON (likely truncated). Re-issue the call."
+    if "_stopped" in params:
+        where = f" for {params['file_path']}" if params.get("file_path") else ""
+        return (f"Error: this {name} call{where} was stopped while it was being "
+                f"written, after {int(params.get('_chars', 0)):,} characters — "
+                f"{params['_stopped']}. Nothing was run or written. Look at what "
+                f"you were repeating before trying again; to write a long file, "
+                f"write the first part, then add the rest with append=true.")
     try:
         out = impl(params, config, tracker)
     except KeyError as e:

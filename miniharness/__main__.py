@@ -572,6 +572,7 @@ def run_turn(state: loop.State, config: dict, tracker) -> bool:
     completed = True
     calls = rounds = 0
     changed: dict[str, None] = {}           # ordered set of files written
+    drafted: dict[str, int] = {}            # tool drafts logged, per 20k chars
     pending: dict[int, tuple] = {}          # id(params) -> (path, before, t0)
 
     try:
@@ -586,6 +587,12 @@ def run_turn(state: loop.State, config: dict, tracker) -> bool:
                 # long command. Nothing else arrives while it does.
                 what = {"Write": "writing", "Edit": "editing"}.get(event.name, "preparing")
                 line = f"{what} {event.name or 'a tool call'} … {event.chars:,} chars"
+                # Into the log as well, every 20,000 characters: the status
+                # line is not recorded, and a 27-minute write left the log with
+                # nothing at all to show for it.
+                if event.chars // 20000 > drafted.get(event.name, 0):
+                    drafted[event.name] = event.chars // 20000
+                    TRANSCRIPT.raw(f"  … {line}\n")
                 if status is None:
                     start_status(line)
                 else:
@@ -639,6 +646,7 @@ def run_turn(state: loop.State, config: dict, tracker) -> bool:
                 if streaming:
                     console.print()
                     streaming = False
+                drafted.clear()
                 calls += 1
                 rounds = max(rounds, event.round)
                 console.print(Text.assemble(
