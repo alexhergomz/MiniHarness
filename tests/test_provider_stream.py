@@ -816,7 +816,7 @@ def test_circling_reasoning_is_ended_with_its_work_kept(monkeypatch):
 
     stopped = [e for e in out if isinstance(e, provider.StoppedCircling)]
     assert stopped, "the loop was never interrupted"
-    assert "distinct" in stopped[0].reason, stopped[0].reason
+    assert "stopped progressing" in stopped[0].reason, stopped[0].reason
 
     assert len(calls) == 2, "the landing round did not run"
     handed_back = calls[1][-2]["content"]
@@ -920,3 +920,30 @@ def test_the_summariser_is_watched_for_circling_too(monkeypatch):
     assert note, "an interrupted summariser must still return what it wrote"
     assert "Changed" in note, "the partial note was discarded"
     assert len(note) < len(circle), "it ran to the cap despite the guard"
+
+
+def test_circling_after_a_healthy_start_is_still_caught():
+    """The ratio used to be taken over all the reasoning so far, so a varied
+    opening kept it above the threshold long after the model began repeating
+    itself. A saved 67,000-token turn read 0.42-0.48 overall — just above
+    0.40 — while its recent reasoning was 0.26 distinct. It had decided the
+    same fix 38 times without making it."""
+    from miniharness.provider import _Deliberation
+
+    healthy = "".join(f"Step {i}: consider case {i * 7 % 13} of the parser, "
+                      f"where token {i} meets rule {i % 5}.\n" for i in range(400))
+    circling = ("Actually, the simplest fix is to store the child in _children.\n"
+                "Let me implement this fix by modifying the Value class.\n"
+                "The gradient calculation involves complex interactions.\n") * 400
+    d = _Deliberation({"llama_ctx": 65536})
+    fired_at = None
+    text = healthy + circling
+    for i in range(0, len(text), 300):
+        if d.feed(text[i:i + 300]):
+            fired_at = i
+            break
+    assert fired_at is not None, "circling after a healthy start went unnoticed"
+    assert fired_at < len(healthy) + 20000, "caught, but only by the length cap"
+
+    d = _Deliberation({"llama_ctx": 65536})
+    assert not any(d.feed(healthy[i:i + 300]) for i in range(0, len(healthy), 300))

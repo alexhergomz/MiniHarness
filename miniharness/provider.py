@@ -496,9 +496,10 @@ class _Deliberation:
     keeps every token of reasoning and asks for a decision (§2.3, §3.4).
     """
 
-    MIN_SAMPLE = 6000        # characters before the ratio means anything
+    MIN_SAMPLE = 12000       # characters before the ratio means anything: one window
     CHECK_EVERY = 2000
     MIN_DISTINCT = 0.40      # measured: 0.019 looping, 0.41 paraphrasing, 0.72+ healthy
+    WINDOW = 12000           # characters — the last ~3,000 tokens
 
     def __init__(self, config: dict):
         from . import config as _cfg
@@ -529,13 +530,27 @@ class _Deliberation:
         if self._len - self._checked < self.CHECK_EVERY or self._len < self.MIN_SAMPLE:
             return None
         self._checked = self._len
-        lines = [l.strip() for l in "".join(self._buf).splitlines() if l.strip()]
+        # Measured over the *recent* reasoning, not all of it. The ratio used
+        # to be taken over everything since the first line, so a healthy start
+        # kept it up long after the model had begun going round: a saved
+        # 67,000-token turn read 0.42-0.48 cumulatively — just over the line —
+        # while its most recent 3,000 tokens were 0.26 distinct by line and
+        # 0.20 by phrase. It had decided the same fix 38 times without making
+        # it. Over a window, that trips at ~7,000 tokens instead of never.
+        recent = "".join(self._buf)[-self.WINDOW:]
+        lines = [l.strip() for l in recent.splitlines() if l.strip()]
         if len(lines) < 20:
             return None
-        ratio = len(set(lines)) / len(lines)
-        if ratio < self.MIN_DISTINCT:
-            return (f"reasoning stopped progressing — {ratio:.0%} of its lines "
-                    f"were distinct over {self._len // 4:,} tokens")
+        line_ratio = len(set(lines)) / len(lines)
+        # Both measures, so quoting one block of code twice — repeated lines,
+        # but surrounded by new prose — is not mistaken for circling.
+        words = recent.split()
+        shingles = [" ".join(words[i:i + 8]) for i in range(len(words) - 8)]
+        phrase_ratio = len(set(shingles)) / len(shingles) if shingles else 1.0
+        if line_ratio < self.MIN_DISTINCT and phrase_ratio < self.MIN_DISTINCT:
+            return (f"reasoning stopped progressing — over the last "
+                    f"{len(recent) // 4:,} tokens only {line_ratio:.0%} of lines "
+                    f"and {phrase_ratio:.0%} of phrases were new")
         return None
 
 
