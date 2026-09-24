@@ -161,3 +161,28 @@ def test_the_map_says_where_the_paths_are_relative_to(tmp_path):
     m = context.focus_map({"_cwd": str(tmp_path), "repo_map": True}, [])
     assert str(tmp_path) in m, "the map must state the working directory"
     assert "relative to it" in m
+
+
+def test_the_map_lists_files_nobody_has_committed_yet(tmp_path):
+    """A new project's first commit had only its spec. Listing tracked files
+    alone hid every module the agent wrote, and after a compaction the agent
+    read the map and concluded they did not exist."""
+    import subprocess
+    from miniharness import repomap
+
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    (tmp_path / "spec.md").write_text("# spec\n")
+    (tmp_path / "gone.py").write_text("x = 1\n")
+    subprocess.run(["git", "add", "-A"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "s"],
+                   cwd=tmp_path, check=True)
+    (tmp_path / "gone.py").unlink()                      # tracked, then deleted
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "value.py").write_text("class Value: pass\n")   # untracked
+    (tmp_path / "pkg" / "__pycache__").mkdir()
+    (tmp_path / "pkg" / "__pycache__" / "value.cpython-313.pyc").write_bytes(b"\0")
+    (tmp_path / ".pytest_cache").mkdir()
+    (tmp_path / ".pytest_cache" / "README.md").write_text("cache")
+
+    files = set(repomap.list_files(str(tmp_path)))
+    assert files == {"spec.md", "pkg/value.py"}, files

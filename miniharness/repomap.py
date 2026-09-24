@@ -41,7 +41,7 @@ import re
 import subprocess
 
 _WORD = re.compile(r"[A-Za-z][A-Za-z0-9]+")
-# Directories that are never source. Only used when git cannot answer.
+# Directories that are never source, whether or not git is asked.
 _SKIP = {"node_modules", "__pycache__", "venv", ".venv", "build", "dist",
          "target", "vendor", "third_party"}
 
@@ -55,10 +55,29 @@ def list_files(root: str) -> list[str]:
     anchoring rules — is reimplementing something already installed.
     """
     try:
-        out = subprocess.run(["git", "-C", root, "ls-files"],
+        # --others --exclude-standard: files the agent has created but nobody
+        # has committed yet are source too. Tracked files alone left a new
+        # project's map showing only what was in the first commit — watched:
+        # after a compaction the agent read the map, saw a single markdown
+        # file, and concluded the two modules it had just written were absent.
+        out = subprocess.run(["git", "-C", root, "ls-files", "--cached",
+                              "--others", "--exclude-standard"],
                              capture_output=True, text=True, timeout=15)
         if out.returncode == 0 and out.stdout.strip():
-            return [ln for ln in out.stdout.splitlines() if ln]
+            seen: set[str] = set()
+            files = []
+            for ln in out.stdout.splitlines():
+                parts = ln.split("/")
+                # A repository with no .gitignore still has caches in it.
+                if (not ln or ln in seen
+                        or any(d in _SKIP or d.startswith(".") for d in parts[:-1])
+                        or ln.endswith((".pyc", ".pyo"))
+                        # --cached still lists a tracked file that was deleted.
+                        or not os.path.isfile(os.path.join(root, ln))):
+                    continue
+                seen.add(ln)
+                files.append(ln)
+            return files
     except (OSError, subprocess.SubprocessError):
         pass
 
