@@ -294,12 +294,28 @@ def _connect(url: str, headers: dict, payload: dict, config: dict):
     # the same failure as an unannounced continuation, in a different layer.
     timeout = config.get("request_timeout", 120)
     last = ""
-    for attempt in range(attempts + 1):
+    attempt = 0
+    waited = 0.0
+    while True:
         try:
             resp = requests.post(url, headers=headers, json=payload,
                                  stream=True, timeout=timeout)
         except (requests.ConnectionError, requests.Timeout) as e:
             last = f"{type(e).__name__}: {e}"
+            # A timeout from a server that is demonstrably working is not a
+            # failure to reach it. Watched after a laptop suspend: the request
+            # in flight was abandoned, but llama-server — one slot — carried on
+            # generating for it, so every new request queued behind it and timed
+            # out, four times, and the turn was thrown away as "could not reach"
+            # a server that was up and busy. While its own /slots says it is
+            # processing, keep waiting; a server that says nothing, or says it
+            # is idle, still gets the ordinary bounded retries.
+            if (isinstance(e, requests.Timeout) and waited < BUSY_WAIT_LIMIT
+                    and _server_busy(url)):
+                waited += float(timeout)
+                _note(config, f"the server is still busy with an earlier request "
+                              f"— waiting ({waited / 60:.0f} min so far)")
+                continue
             if attempt >= attempts:
                 raise RuntimeError(f"could not reach {url}: {last}") from e
             _note(config, f"no response in {timeout}s — retry "
@@ -317,9 +333,32 @@ def _connect(url: str, headers: dict, payload: dict, config: dict):
             except ValueError:
                 hinted = 0.0
             time.sleep(max(hinted, _backoff(attempt)))
+            attempt += 1
             continue
         time.sleep(_backoff(attempt))
-    raise RuntimeError(f"could not reach {url}: {last}")  # pragma: no cover
+        attempt += 1
+
+
+# How long to wait on a server that reports itself busy. Generous: the busy
+# work is at most one reply, which the reasoning limit bounds.
+BUSY_WAIT_LIMIT = 1800.0
+
+
+def _server_busy(url: str) -> bool:
+    """True if a llama-server at this URL reports a slot still processing.
+
+    Only llama-server has /slots; anything else answers 404 or not at all, and
+    that is taken as "not known to be busy" — the ordinary retries apply.
+    """
+    root = url.split("/v1/")[0]
+    try:
+        r = requests.get(f"{root}/slots", timeout=5)
+        if r.status_code != 200:
+            return False
+        slots = r.json()
+        return any(isinstance(s, dict) and s.get("is_processing") for s in slots)
+    except Exception:
+        return False
 
 
 class _Heartbeat:

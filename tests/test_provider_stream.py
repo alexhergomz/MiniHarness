@@ -979,3 +979,46 @@ def test_a_single_line_repeated_forever_is_caught():
     text = "The error points here:\n    return Value(0.0, (self), 'neg')\n    " + "^" * 200000
     fired = next((i for i in range(0, len(text), 300) if d.feed(text[i:i + 300])), None)
     assert fired is not None and fired < 40000, fired
+
+
+def test_a_busy_server_is_waited_for_not_given_up_on(monkeypatch):
+    """After a laptop suspend, llama-server kept generating for the abandoned
+    request, so new ones queued and timed out four times — and the turn was
+    thrown away as "could not reach" a server that was up and working."""
+    from miniharness import provider
+    net = provider.requests
+    monkeypatch.setattr(provider.time, "sleep", lambda s: None)
+    monkeypatch.setattr(provider, "_note", lambda cfg, text: None)
+
+    class Resp:
+        status_code = 200
+        def __init__(self, busy): self._busy = busy
+        def json(self): return [{"id": 0, "is_processing": self._busy}]
+
+    def run(post_script, busy):
+        posts = iter(post_script)
+        def post(*a, **k):
+            step = next(posts)
+            if step == "timeout":
+                raise net.Timeout("timed out")
+            return type("R", (), {"status_code": 200})()
+        monkeypatch.setattr(net, "post", post)
+        monkeypatch.setattr(net, "get", lambda *a, **k: Resp(busy()))
+        return provider._connect("http://127.0.0.1:8080/v1/chat/completions", {}, {},
+                                 {"max_retries": 1, "request_timeout": 120})
+
+    # Busy for six timeouts — more than the retries allow — then it answers.
+    state = {"n": 0}
+    def busy_then_free():
+        state["n"] += 1
+        return state["n"] <= 6
+    assert run(["timeout"] * 6 + ["ok"], busy_then_free).status_code == 200
+
+    # A server that says it is idle and still does not answer: bounded retries.
+    with pytest.raises(RuntimeError, match="could not reach"):
+        run(["timeout"] * 10, lambda: False)
+
+    # Busy forever: the wait itself is bounded too.
+    monkeypatch.setattr(provider, "BUSY_WAIT_LIMIT", 600.0)
+    with pytest.raises(RuntimeError, match="could not reach"):
+        run(["timeout"] * 50, lambda: True)
