@@ -32,7 +32,20 @@ class ModelSpec:
     family: str
     repo: str                # Hugging Face GGUF repo
     params_b: float
-    kv_gb_per_16k: float     # full-precision KV cache, GB per 16K tokens
+    # Full-precision KV cache, GB per 16K tokens — computed from each model's
+    # published config.json, not estimated:
+    #     2 (K and V) × full-attention layers × KV heads × head_dim × 2 bytes × 16,384
+    # counting only layers that keep a cache for the whole context. Qwen3.5
+    # keeps one in 1 layer in 4 (the rest are linear attention); Gemma 4 and
+    # GPT-OSS alternate with sliding-window layers whose cache is a fixed few
+    # hundred tokens. The figures used to be hand-estimated, and were wrong in
+    # both directions: 2x too high for Qwen3.5-9B/27B, Gemma and GPT-OSS —
+    # which cost a 9B run half the context it could have had, and it compacted
+    # every two or three calls — and 2.3x too LOW for Nemotron, which would
+    # have been offered a window that does not fit. Checked against the GPU:
+    # 0.537 GB at f16, over turbo3's ~5.1x, predicts 0.105 GB per 16K, and both
+    # Qwen3.5-4B and -9B measured exactly that in llama-server's own log.
+    kv_gb_per_16k: float
     tier: int                # 1 = recommend first
     note: str = ""
     max_ctx_k: int = 0
@@ -70,42 +83,42 @@ FAMILY_SAMPLING: dict[str, dict] = {
 
 
 CATALOG: list[ModelSpec] = [
-    ModelSpec("qwen3.5-0.8b", "Qwen3.5", "unsloth/Qwen3.5-0.8B-GGUF", 0.8, 0.12, 2,
+    ModelSpec("qwen3.5-0.8b", "Qwen3.5", "unsloth/Qwen3.5-0.8B-GGUF", 0.8, 0.201, 2,
               "Ultra-light; phones / CPU-only."),
-    ModelSpec("qwen3.5-2b", "Qwen3.5", "unsloth/Qwen3.5-2B-GGUF", 2.0, 0.28, 2,
+    ModelSpec("qwen3.5-2b", "Qwen3.5", "unsloth/Qwen3.5-2B-GGUF", 2.0, 0.201, 2,
               "Small but coherent for simple loops."),
-    ModelSpec("qwen3.5-4b", "Qwen3.5", "unsloth/Qwen3.5-4B-GGUF", 4.0, 0.5, 1,
+    ModelSpec("qwen3.5-4b", "Qwen3.5", "unsloth/Qwen3.5-4B-GGUF", 4.0, 0.537, 1,
               "Good balance on <=8 GB."),
-    ModelSpec("qwen3.5-9b", "Qwen3.5", "unsloth/Qwen3.5-9B-GGUF", 9.0, 1.0, 1,
+    ModelSpec("qwen3.5-9b", "Qwen3.5", "unsloth/Qwen3.5-9B-GGUF", 9.0, 0.537, 1,
               "The tuned target — best local agent on 8 GB."),
-    ModelSpec("qwen3.5-27b", "Qwen3.5", "unsloth/Qwen3.5-27B-GGUF", 27.0, 2.4, 1,
+    ModelSpec("qwen3.5-27b", "Qwen3.5", "unsloth/Qwen3.5-27B-GGUF", 27.0, 1.074, 1,
               "Needs a big GPU or lots of RAM."),
-    ModelSpec("gemma4-e4b", "Gemma 4", "unsloth/gemma-4-E4B-it-GGUF", 4.0, 0.45, 2,
+    ModelSpec("gemma4-e4b", "Gemma 4", "unsloth/gemma-4-E4B-it-GGUF", 4.0, 0.235, 2,
               "Efficient 4B-class."),
-    ModelSpec("gemma4-12b", "Gemma 4", "unsloth/gemma-4-12b-it-GGUF", 12.0, 1.3, 2,
+    ModelSpec("gemma4-12b", "Gemma 4", "unsloth/gemma-4-12b-it-GGUF", 12.0, 1.074, 2,
               "12B; ~10 GB+ at 4-bit."),
     ModelSpec("nemotron-nano-8b", "Nemotron", "unsloth/Llama-3.1-Nemotron-Nano-8B-v1-GGUF",
-              8.0, 0.95, 3, "Reliable native tool calls."),
+              8.0, 2.147, 3, "Reliable native tool calls."),
 
     # Big cards. Without these the menu topped out at 27B, so a 48 GB or 80 GB
     # card was offered a model it could have run four times over. Every repo
     # here was checked to resolve on Hugging Face — a catalog entry that 404s
     # at download time fails at the worst possible moment.
     ModelSpec("qwen3-coder-30b-a3b", "Qwen3",
-              "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF", 30.0, 1.5, 1,
+              "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF", 30.0, 1.611, 1,
               "MoE: 30B total, 3B active — 30B quality at near-3B speed. "
               "~18 GB at 4-bit. Best pick for a 24 GB card.", active_b=3.0,
               sampling={"temp": 0.7, "top_p": 0.8, "top_k": 20,
                         "repeat_penalty": 1.05}),
-    ModelSpec("qwen3-32b", "Qwen3", "unsloth/Qwen3-32B-GGUF", 32.0, 4.0, 2,
+    ModelSpec("qwen3-32b", "Qwen3", "unsloth/Qwen3-32B-GGUF", 32.0, 4.295, 2,
               "Dense 32B, ~20 GB at 4-bit. Stronger than the MoE per token, "
               "but far slower and its KV cache is heavy."),
-    ModelSpec("gpt-oss-120b", "GPT-OSS", "unsloth/gpt-oss-120b-GGUF", 120.0, 1.1, 1,
+    ModelSpec("gpt-oss-120b", "GPT-OSS", "unsloth/gpt-oss-120b-GGUF", 120.0, 0.604, 1,
               "MoE, ships native MXFP4 at ~63 GB — the 80 GB-card option. "
               "There is no smaller quant, so it either fits or it does not.",
               active_b=5.1, min_gb=65.0),
     ModelSpec("qwen3-235b-a22b", "Qwen3", "unsloth/Qwen3-235B-A22B-GGUF",
-              235.0, 3.0, 3,
+              235.0, 3.154, 3,
               "MoE: 235B total, 22B active. Needs ~120 GB at 4-bit — multi-GPU, "
               "or one big card with most experts on CPU.", active_b=22.0),
 ]
@@ -350,6 +363,11 @@ def detect_hardware() -> Hardware:
 # ── Fit math ────────────────────────────────────────────────────────────────
 RUNTIME_OVERHEAD_GB = 0.8   # compute / activation buffers
 MIN_CTX_K = 8               # a quant that can't hold 8K context isn't viable
+# The window an agent needs to work without compacting constantly. Measured:
+# Qwen3.5-9B at 32k compacted 12 times in 28 minutes of a build task, every two
+# or three tool calls, and lost its working state each time; the 4B at 64k
+# compacted 1-4 times on the same task.
+WORK_CTX_K = 64
 DEFAULT_KV_DIV = 4.0        # q4_0 KV cache (DESIGN.md §5.2)
 
 # KV cache types, most faithful first, with how much smaller each is than f16.
@@ -433,8 +451,15 @@ def recommend_for_model(budget_gb: float, model: ModelSpec, quants: list[Quant],
         return []
 
     fits = [t for t in scored if t[1] >= target]
+    working = [t for t in scored if t[1] >= WORK_CTX_K]
     if fits:
         q, c, kv = max(fits, key=lambda t: quant_quality(t[0].label))
+    elif working:
+        # Native context out of reach: the best weights that still leave a
+        # working window, rather than the most context at any quality. The old
+        # rule — most context wins — put Qwen3.5-9B on a 6 GB card at 2 bits
+        # for a 245k window no agent turn uses, when 3-bit weights leave 69k.
+        q, c, kv = max(working, key=lambda t: quant_quality(t[0].label))
     else:
         q, c, kv = max(scored, key=lambda t: (t[1], quant_quality(t[0].label)))
     best = Pick(model, q, int(min(c, 9999)), c >= target, recommended=True, kv_quant=kv)

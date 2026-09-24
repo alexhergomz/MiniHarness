@@ -1215,16 +1215,24 @@ def test_memory_is_spent_on_model_size_before_kv_fidelity():
         picks.sort(key=lambda p: (not p.fits_target, p.model.tier, -p.model.params_b))
         return picks[0] if picks else None
 
+    factor = {"IQ2_M": 0.32, "Q3_K_M": 0.45, "Q4_K_M": 0.60, "Q5_K_M": 0.70, "Q8_0": 1.05}
     for budget in (6, 8, 12, 24, 40, 80):
         d = default_for(budget)
         assert d is not None
         if d.kv_quant != "q4_0":
-            # Spending on KV fidelity is only justified when nothing larger,
-            # at a better weight quant, would also reach native context.
+            # Spending on KV fidelity is only justified when nothing larger, at
+            # the *same* weight quant, would also reach native context. It used
+            # to compare against a larger model at 2 bits, which demanded
+            # trading good weights for size — the trade that put a 9B on a 6 GB
+            # card at IQ2 when the KV figures were corrected.
+            # And only models the catalog ranks at least as highly: the tier is
+            # a judgement of how well a model works as an agent, and a bigger
+            # model of a lower tier is not what the memory should have bought.
             bigger = [m for m in models.candidates(budget)
-                      if m.params_b > d.model.params_b]
+                      if m.params_b > d.model.params_b and m.tier <= d.model.tier]
             for m in bigger:
-                quants = [models.Quant(label="IQ2_M", size_gb=m.params_b * 0.32,
+                label = d.quant.label
+                quants = [models.Quant(label=label, size_gb=m.params_b * factor[label],
                                        filename="q.gguf", shards=1)]
                 for p in models.recommend_for_model(budget, m, quants):
                     assert not p.fits_target, (
@@ -2310,3 +2318,32 @@ def test_an_unchanged_result_after_edits_counts_as_stuck(tmp_path):
     tools.new_turn()                              # no edits: never a hint
     assert not any("[hint:" in tools.dispatch("Bash", {"command": "ls"}, cfg, None)
                    for _ in range(8))
+
+
+def test_kv_figures_come_from_the_published_architecture():
+    """Hand-estimated KV figures were 2x too high for Qwen3.5-9B/27B, Gemma and
+    GPT-OSS and 2.3x too low for Nemotron. Pinned to config.json:
+    2 × full-attention layers × KV heads × head_dim × 2 bytes × 16,384."""
+    from miniharness import models
+    arch = {  # key: (full-attention layers, KV heads, head_dim)
+        "qwen3.5-4b": (8, 4, 256), "qwen3.5-9b": (8, 4, 256), "qwen3.5-27b": (16, 4, 256),
+        "nemotron-nano-8b": (32, 8, 128), "qwen3-32b": (64, 8, 128), "gpt-oss-120b": (18, 8, 64),
+    }
+    for key, (layers, heads, dim) in arch.items():
+        want = 2 * layers * heads * dim * 2 * 16384 / 1e9
+        assert abs(models.CATALOG_BY_KEY[key].kv_gb_per_16k - want) < 0.002, key
+
+
+def test_a_9b_on_a_6gb_card_gets_usable_weights_not_2_bits():
+    """The old rule — most context wins once native context is out of reach —
+    put Qwen3.5-9B at IQ2_XXS for a 245k window no agent turn uses. Sizes are
+    the real ones from unsloth/Qwen3.5-9B-GGUF."""
+    from miniharness import models
+    spec = models.CATALOG_BY_KEY["qwen3.5-9b"]
+    sizes = {"UD-IQ2_XXS": 3.19, "UD-IQ2_M": 3.6, "UD-IQ3_XXS": 4.0, "Q3_K_S": 4.3,
+             "Q3_K_M": 4.67, "UD-Q3_K_XL": 5.0, "IQ4_XS": 5.2, "Q4_K_M": 5.68}
+    quants = [models.Quant(label=l, size_gb=g, filename=f"{l}.gguf", shards=1)
+              for l, g in sizes.items()]
+    best = models.recommend_for_model(6.05, spec, quants)[0]
+    assert best.quant.label == "Q3_K_M", best.quant.label
+    assert best.ctx_k >= models.WORK_CTX_K
