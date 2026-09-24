@@ -431,6 +431,8 @@ def run(
     """Run the agent until it stops calling tools. Yields events."""
     schemas = tools.schemas_for(config)
     max_turns = int(config.get("max_turns", 100))
+    tools.new_turn()
+    stuck_told = False
     state.continuations = 0
     state.empty_retries = 0
 
@@ -545,6 +547,14 @@ def run(
                 result = tools.dispatch(name, params, config, tracker)
 
             yield ToolEnd(name, result, denied)
+            if tools.struggle_level() >= 3 and not stuck_told:
+                # The last hint is for the person, not only the model: this is
+                # where a sentence of human knowledge is worth more than more
+                # attempts.
+                stuck_told = True
+                yield Notice(f"the model looks stuck — the same failure keeps "
+                             f"coming back: {tools._FAIL_STREAK['sig']}. "
+                             f"Ctrl-C and give it a hint if you know what is wrong.")
             if (name in tools.MUTATING and not denied
                     and not result.startswith("Error")):
                 # A checkpoint per accepted change, in a shadow repository —

@@ -989,8 +989,14 @@ def _bash(p: dict, cfg: dict, tracker) -> str:
     out = (r.stdout or "") + (("\n[stderr]\n" + r.stderr) if r.stderr else "")
     if r.returncode != 0:
         out += f"\n[exit {r.returncode}]"
-    out += _test_regression(out, cfg)
-    return _truncate(out.strip() or "[no output]", output_cap(cfg))
+    # Notes go on after truncation, not before: a long test run is truncated
+    # from the end, which is exactly where a note appended first would sit.
+    notes = _test_regression(out, cfg) + _struggle(out, r.returncode)
+    # Room is left for them, too: dispatch pages anything over the cap, and it
+    # would cut the notes off the end of a result that fit only without them.
+    # (_truncate's own marker is added on top of the limit it is given.)
+    room = max(1000, output_cap(cfg) - len(notes) - 80)
+    return _truncate(out.strip() or "[no output]", room) + notes
 
 
 # Last test result seen per working directory. Session-scoped and deliberately
@@ -1014,7 +1020,12 @@ def _test_regression(out: str, cfg: dict) -> str:
     ordinary; not noticing is the problem.
     """
     m = None
-    for m2 in _SUITE_RE.finditer(out):
+    # Only short lines near the end. The pattern's `[^\n]*` rescans the rest of
+    # the line from every starting position, so on one long line it was
+    # quadratic: 10 s for 60,000 characters, minutes for a minified file. A
+    # test summary is a short line at the end of a run.
+    tail = "\n".join(l for l in out[-40000:].splitlines() if len(l) <= 500)
+    for m2 in _SUITE_RE.finditer(tail):
         if m2.group("passed") or m2.group("failed"):
             m = m2                       # the last summary line wins
     if not m:
@@ -1033,6 +1044,83 @@ def _test_regression(out: str, cfg: dict) -> str:
                 f"`git diff` shows what changed since the last commit.]")
     if failed < was_failed and failed == 0:
         return f"\n[the suite is green again: {passed} passed]"
+    return ""
+
+
+# ── Hints when the same failure keeps coming back ───────────────────────────
+# Within one turn: the failure most recently seen, and how many times running.
+_FAIL_STREAK: dict[str, object] = {"sig": "", "count": 0, "told": 0}
+# Bounded: an unbounded \w+ ahead of "Error" backtracks at every position of a
+# long line, which is quadratic — a 200,000-character line of minified output
+# took minutes of CPU. Exception names are short, and only line tails are read.
+_FAIL_LINE = re.compile(r"(\b\w{1,64}(?:Error|Exception)\b.*|FAILED .*|assert .*|Error: .*)")
+
+
+def new_turn() -> None:
+    """A new message from the user: hints start over."""
+    _FAIL_STREAK.update(sig="", count=0, told=0)
+
+
+def struggle_level() -> int:
+    """0, or the highest hint given this turn (1-3). The loop surfaces 3."""
+    return int(_FAIL_STREAK["told"])
+
+
+def _failure_signature(out: str) -> str:
+    # The verdict is at the end of a run; look at the last lines, and only at
+    # the last 400 characters of each, so the cost is flat however long the
+    # output is.
+    lines = [l.strip()[-400:] for l in out[-40000:].splitlines()
+             if l.strip() and not l.startswith("[exit")][-60:]
+    for line in reversed(lines):
+        if (m := _FAIL_LINE.search(line)):
+            return m.group(1)[:200]
+    return lines[-1][:200] if lines else ""
+
+
+def _struggle(out: str, returncode: int) -> str:
+    """Escalating hints when a run keeps ending in the same failure.
+
+    Like a game's hints, and for the same reason: the harness cannot know the
+    answer, but it can know for certain that the player is stuck. Watched on
+    two live builds: `AssertionError: a.grad = 1.0` returned run after run for
+    twenty minutes, while a working WebSearch tool sat unused — zero searches
+    in either run. The model was not short of attempts; it was short of a
+    different approach, and nothing told it so.
+
+    So the hints escalate the *strategy*, never the answer: step back and
+    restate the gap; then go and look; then stop and ask. Each is attached to
+    the result that triggered it, never sent as a user message of its own
+    (§3.3.1), and a different failure — which is progress — starts over.
+    """
+    if returncode == 0:
+        _FAIL_STREAK.update(sig="", count=0)
+        return ""
+    sig = _failure_signature(out)
+    if not sig:
+        return ""
+    if sig == _FAIL_STREAK["sig"]:
+        _FAIL_STREAK["count"] = int(_FAIL_STREAK["count"]) + 1
+    else:
+        _FAIL_STREAK.update(sig=sig, count=1)
+    n = int(_FAIL_STREAK["count"])
+    if n == 3:
+        _FAIL_STREAK["told"] = max(1, int(_FAIL_STREAK["told"]))
+        return (f"\n[hint: this is the 3rd run in a row ending in `{sig}`. Before "
+                f"editing again, write one line saying what the failing check "
+                f"expects and what your code does instead — the gap between those "
+                f"two is the bug.]")
+    if n == 5:
+        _FAIL_STREAK["told"] = max(2, int(_FAIL_STREAK["told"]))
+        return (f"\n[hint: 5 runs in a row now end in `{sig}`, so the current "
+                f"approach is not converging. Look up how this is normally done "
+                f"before trying again: WebSearch for the concept (not your code), "
+                f"then WebFetch a page that explains it.]")
+    if n == 7:
+        _FAIL_STREAK["told"] = 3
+        return (f"\n[hint: 7 runs in a row end in `{sig}`. Stop trying variations. "
+                f"Report to the user what you have tried, what you think is wrong, "
+                f"and what you would need to know to fix it.]")
     return ""
 
 

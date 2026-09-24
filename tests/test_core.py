@@ -2249,3 +2249,42 @@ def test_rereading_an_unchanged_file_is_pointed_out(tmp_path):
         tools.dispatch("Read", {"file_path": "value.py"}, cfg, None)
     f.write_text("x = 2\n")                                       # changed on disk
     assert "has not changed" not in tools.dispatch("Read", {"file_path": "value.py"}, cfg, None)
+
+
+def test_the_same_failure_brings_escalating_hints(tmp_path):
+    """Watched on two live builds: the same assertion for twenty minutes and
+    zero web searches. The hints escalate the approach, never the answer."""
+    from miniharness import tools
+    cfg = {"_cwd": str(tmp_path)}
+    fail = "python3 -c \"assert False, 'a.grad = 1.0'\""
+    tools.new_turn()
+    outs = [tools.dispatch("Bash", {"command": fail}, cfg, None) for _ in range(7)]
+    hinted = [i + 1 for i, o in enumerate(outs) if "[hint:" in o]
+    assert hinted == [3, 5, 7], hinted
+    assert "what the failing check" in outs[2]
+    assert "WebSearch" in outs[4]
+    assert "Report to the user" in outs[6]
+    assert tools.struggle_level() == 3
+
+    # A different failure is progress: the count starts over.
+    tools.new_turn()
+    for _ in range(2):
+        tools.dispatch("Bash", {"command": fail}, cfg, None)
+    other = tools.dispatch("Bash", {"command": "python3 -c \"assert False, 'b.grad'\""}, cfg, None)
+    assert "[hint:" not in other
+    # So does a passing run.
+    tools.dispatch("Bash", {"command": "true"}, cfg, None)
+    assert "[hint:" not in tools.dispatch("Bash", {"command": fail}, cfg, None)
+
+
+def test_a_note_survives_a_long_test_run(tmp_path):
+    """Output is truncated from the end, and notes were appended before the
+    truncation — so on a long run the note was the part that got cut."""
+    from miniharness import tools
+    cfg = {"_cwd": str(tmp_path), "llama_ctx": 8192}
+    long_fail = ("python3 -c \"print('x' * 200000); "
+                 "raise AssertionError('a.grad = 1.0')\"")
+    tools.new_turn()
+    outs = [tools.dispatch("Bash", {"command": long_fail}, cfg, None) for _ in range(3)]
+    assert "truncated" in outs[2]
+    assert outs[2].rstrip().endswith("the gap between those two is the bug.]")
