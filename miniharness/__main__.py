@@ -455,7 +455,11 @@ def _result_line(name: str, result: str) -> tuple[str, int]:
     a passing test run was a row of dots.
     """
     import re as _re
-    lines = [l.strip() for l in (result or "").splitlines() if l.strip()]
+    # The harness's own notes come last and are shown separately
+    # (_show_notes); left in, the last one became the headline in place of the
+    # command's verdict.
+    lines = [l.strip() for l in (result or "").splitlines()
+             if l.strip() and not l.strip().startswith(_NOTE_PREFIXES)]
     if not lines:
         return "", 0
     if name == "Read" and not lines[0].startswith("Error"):
