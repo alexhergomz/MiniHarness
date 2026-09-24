@@ -154,6 +154,11 @@ DEFAULTS: dict[str, Any] = {
     # screen. Hidden by default — "/think" expands the last one either way.
     "show_thinking": False,
     "transcript": True,              # plain-text log of each session, beside it
+    # Longest single stretch of reasoning before the landing round asks for a
+    # decision. The model card's number (Qwen3.5: 32,768 for most queries,
+    # 81,920 for competition-grade problems). Circling is caught long before
+    # this by the repetition check; this only ends reasoning that never lands.
+    "think_limit": 32768,
 
     # ── Context ─────────────────────────────────────────────────────────────
     # ── Everything below is a SHARE of the context window ───────────────────

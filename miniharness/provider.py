@@ -518,19 +518,28 @@ class _Deliberation:
     MIN_DISTINCT = 0.40      # measured: 0.019 looping, 0.41 paraphrasing, 0.72+ healthy
     WINDOW = 12000           # characters — the last ~3,000 tokens
 
+    # Measured with the model's own tokenizer on 268,089 characters of its
+    # reasoning: 70,611 tokens. Python source runs 4.06.
+    CHARS_PER_TOKEN = 3.8
+
     def __init__(self, config: dict):
-        from . import config as _cfg
-        window = int(config.get("llama_ctx") or 0)
-        share = float(config.get("think_share", 0.25))
-        # A floor, so a small window does not make the backstop tight enough to
-        # interrupt ordinary work. It was 8,192 tokens at 10% of the window —
-        # sized from small fix-a-bug tasks, where healthy reasoning ran a few
-        # hundred to ~2,000 tokens. A build-from-spec task legitimately runs
-        # longer, and on a 64k window 8,192 is about four minutes of thinking.
-        # The ratio check below is the precise guard; this is only the backstop
-        # for something that has plainly stopped converging, so it errs long.
-        floor = int(config.get("think_floor", 16384))
-        self.cap_chars = max(floor, int(window * share)) * 4
+        # The backstop is the model's own number, not a share of the window.
+        # Qwen3.5's card: "We recommend using an output length of 32,768 tokens
+        # for most queries" (81,920 for competition-grade maths and code). It
+        # was 8,192 and then 16,384 — sized from the harness's side, and short
+        # of what the model's authors say it needs. It can be this generous
+        # because it is no longer the guard that does the work: circling is
+        # caught by the repetition check over recent reasoning, which fired at
+        # 4,000-7,000 tokens on every circle of a live build. This only stops
+        # reasoning that is new line after line and still never lands.
+        #
+        # Reasoning is dropped by the template at the next user message, but
+        # not before: within a turn every step's reasoning stays in context, so
+        # a long think costs room for the rest of that turn. Compaction pays
+        # for that; the window's own bound still ends a round that would not
+        # fit. Neither is a reason to cut the model short of its card.
+        limit = int(config.get("think_limit", 32768))
+        self.cap_chars = int(limit * self.CHARS_PER_TOKEN)
         self.enabled = bool(config.get("stop_circling", True))
         self._buf: list[str] = []
         self._len = 0
@@ -542,8 +551,8 @@ class _Deliberation:
         self._buf.append(text)
         self._len += len(text)
         if self._len >= self.cap_chars:
-            return (f"reasoning reached {self._len // 4:,} tokens without "
-                    f"reaching a conclusion")
+            return (f"reasoning reached ~{int(self._len / self.CHARS_PER_TOKEN):,} "
+                    f"tokens without reaching a conclusion")
         if self._len - self._checked < self.CHECK_EVERY or self._len < self.MIN_SAMPLE:
             return None
         self._checked = self._len
@@ -566,7 +575,7 @@ class _Deliberation:
         phrase_ratio = len(set(shingles)) / len(shingles) if shingles else 1.0
         if line_ratio < self.MIN_DISTINCT and phrase_ratio < self.MIN_DISTINCT:
             return (f"reasoning stopped progressing — over the last "
-                    f"{len(recent) // 4:,} tokens only {line_ratio:.0%} of lines "
+                    f"{int(len(recent) / self.CHARS_PER_TOKEN):,} tokens only {line_ratio:.0%} of lines "
                     f"and {phrase_ratio:.0%} of phrases were new")
         return None
 
