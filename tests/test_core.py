@@ -2225,3 +2225,27 @@ def test_the_suite_cannot_touch_the_real_miniharness_home():
                  __import__("miniharness.checkpoint", fromlist=["x"]).STORE,
                  server.SLOT_DIR, server.LOG_PATH, research.WORKSPACES):
         assert real not in pathlib.Path(path).parents and pathlib.Path(path) != real, path
+
+
+def test_rereading_an_unchanged_file_is_pointed_out(tmp_path):
+    """Watched live: six Reads of one module in a row with nothing edited or
+    run between them. Every read is still served in full; the note says the
+    file has not changed and names what would produce something new."""
+    from miniharness import tools
+    f = tmp_path / "value.py"
+    f.write_text("x = 1\n")
+    cfg = {"_cwd": str(tmp_path)}
+    tools._READ_STREAK.clear()
+    reads = [tools.dispatch("Read", {"file_path": "value.py"}, cfg, None) for _ in range(3)]
+    assert all("x = 1" in r for r in reads), "a read was withheld"
+    assert "has not changed" not in reads[1]
+    assert "read this file 3 times" in reads[2]
+
+    tools.dispatch("Bash", {"command": "true"}, cfg, None)       # ran something
+    assert "has not changed" not in tools.dispatch("Read", {"file_path": "value.py"}, cfg, None)
+
+    tools._READ_STREAK.clear()
+    for _ in range(2):
+        tools.dispatch("Read", {"file_path": "value.py"}, cfg, None)
+    f.write_text("x = 2\n")                                       # changed on disk
+    assert "has not changed" not in tools.dispatch("Read", {"file_path": "value.py"}, cfg, None)

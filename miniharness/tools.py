@@ -724,9 +724,42 @@ def _rewrite_streak(path: str, cfg: dict) -> str:
 
 
 def note_other_tool_use(name: str) -> None:
-    """Any non-Write call ends the streak: the model went and looked at something."""
+    """Any non-Write call ends the write streak: the model went and looked at
+    something. Anything that changes or runs something ends the read streak."""
     if name != "Write":
         _WRITE_STREAK.clear()
+    if name in MUTATING:
+        _READ_STREAK.clear()
+
+
+# path -> (reads since anything was changed or run, file content hash)
+_READ_STREAK: dict[str, tuple[int, int]] = {}
+
+
+def _reread_streak(path: str) -> str:
+    """Say when a file is being re-read with nothing done in between.
+
+    The mirror of _rewrite_streak. Watched live: six Reads of the same module
+    in a row — 31, 31, 21, 21 lines — with no edit and no test run between
+    them. The model was looking again at text it already had, unchanged, and
+    the harness knew both of those things and said neither.
+
+    Not duplicate suppression: every read is served in full. The note only
+    says what is true — the file has not changed — and names the step that
+    would produce something new.
+    """
+    try:
+        digest = hash(Path(path).read_bytes())
+    except OSError:
+        return ""
+    count, seen = _READ_STREAK.get(path, (0, digest))
+    count = count + 1 if seen == digest else 1     # changed on disk: start over
+    _READ_STREAK[path] = (count, digest)
+    if count < 3:
+        return ""
+    return (f"\n[you have read this file {count} times since anything was changed "
+            f"or run, and it has not changed since the last read — make the edit, "
+            f"or run the tests to see where things stand]")
 
 
 def _norm(t: str) -> str:
@@ -1409,7 +1442,10 @@ def dispatch(name: str, params: dict, config: dict, tracker=None,
         return f"Error: {name} missing required parameter {e}"
     except Exception as e:  # a crashing tool must not kill the loop
         return f"Error: {name} failed: {type(e).__name__}: {e}"
-    return _paginate(name, out, config, continue_from)
+    page = _paginate(name, out, config, continue_from)
+    if name == "Read" and not page.startswith("Error") and params.get("file_path"):
+        page += _reread_streak(str(_resolve(str(params["file_path"]), config)))
+    return page
 
 
 def _paginate(name: str, out: str, config: dict, start: int) -> str:
