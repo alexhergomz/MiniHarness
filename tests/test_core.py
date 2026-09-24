@@ -2212,3 +2212,16 @@ def test_the_checkpoint_store_is_kept_out_of_its_own_snapshots(tmp_path, monkeyp
 
     assert (work / "mod.py").read_text() == "original\n"
     assert checkpoint.history(cfg, sid), "the rewind deleted its own store"
+
+
+def test_the_suite_cannot_touch_the_real_miniharness_home():
+    """A test once saved a config with model="gpt-4o" over the user's real one,
+    on every run. conftest now redirects every HOME-derived path; this pins it."""
+    import pathlib
+    from miniharness import config as cfg_mod
+    from miniharness import research, server, session
+    real = pathlib.Path.home() / ".miniharness"
+    for path in (cfg_mod.HOME, cfg_mod.CONFIG_PATH, session.SESSIONS,
+                 __import__("miniharness.checkpoint", fromlist=["x"]).STORE,
+                 server.SLOT_DIR, server.LOG_PATH, research.WORKSPACES):
+        assert real not in pathlib.Path(path).parents and pathlib.Path(path) != real, path

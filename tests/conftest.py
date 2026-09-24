@@ -26,6 +26,31 @@ def _stub_summariser(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def _isolated_home(tmp_path_factory, monkeypatch):
+    """Every test gets its own ~/.miniharness. Nothing may reach the real one.
+
+    One test built a config with model="gpt-4o" and ran /config, which saves —
+    and it wrote to the user's real config.toml. Every run of the suite reset
+    their setup to a cloud model they do not use, and it was found only when
+    the harness refused to start. Patching that one test would leave the next
+    one free to do the same, so every path derived from HOME is redirected
+    here, for every test, whether or not it looks like it writes anything.
+    """
+    from miniharness import config as cfg_mod
+    from miniharness import research, server, session
+
+    home = tmp_path_factory.mktemp("miniharness-home")
+    monkeypatch.setattr(cfg_mod, "HOME", home)
+    monkeypatch.setattr(cfg_mod, "CONFIG_PATH", home / "config.toml")
+    monkeypatch.setattr(session, "SESSIONS", home / "sessions")
+    monkeypatch.setattr(checkpoint, "STORE", home / "checkpoints")
+    monkeypatch.setattr(server, "SLOT_DIR", home / "slots")
+    monkeypatch.setattr(server, "LOG_PATH", home / "llama-server.log")
+    monkeypatch.setattr(research, "WORKSPACES", home / "research")
+    monkeypatch.setenv("MINIHARNESS_HOME", str(home))
+
+
+@pytest.fixture(autouse=True)
 def _no_checkpoints(monkeypatch, request):
     """Checkpoints run `git add -A` over the agent's working directory.
 
