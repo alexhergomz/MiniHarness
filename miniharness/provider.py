@@ -443,8 +443,16 @@ def _conclude(model, system, messages, reasoned, tool_schemas, config):
     out = None
     text_seen: list[str] = []
     think_seen: list[str] = []
+    # And it is asked to act with thinking switched off. It used to leave
+    # thinking on, and the model answered "stop deliberating" by opening a new
+    # <think> block and deliberating again — until this round's own guard
+    # tripped, the loop continued the partial turn, and the cycle repeated.
+    # Watched live: past the limit and still thinking, several rounds on. The
+    # reasoning so far is in the request, so nothing is lost by this; what is
+    # removed is only the option to keep putting the decision off.
+    landing = dict(config, disable_thinking=True)
     try:
-        for event in stream(model, system, request, tool_schemas, config):
+        for event in stream(model, system, request, tool_schemas, landing):
             if isinstance(event, (TextChunk, ThinkChunk)):
                 yield event
                 if isinstance(event, ThinkChunk):
@@ -495,10 +503,16 @@ class _Deliberation:
     def __init__(self, config: dict):
         from . import config as _cfg
         window = int(config.get("llama_ctx") or 0)
-        share = float(config.get("think_share", 0.10))
+        share = float(config.get("think_share", 0.25))
         # A floor, so a small window does not make the backstop tight enough to
-        # interrupt ordinary work.
-        self.cap_chars = max(8192, int(window * share)) * 4
+        # interrupt ordinary work. It was 8,192 tokens at 10% of the window —
+        # sized from small fix-a-bug tasks, where healthy reasoning ran a few
+        # hundred to ~2,000 tokens. A build-from-spec task legitimately runs
+        # longer, and on a 64k window 8,192 is about four minutes of thinking.
+        # The ratio check below is the precise guard; this is only the backstop
+        # for something that has plainly stopped converging, so it errs long.
+        floor = int(config.get("think_floor", 16384))
+        self.cap_chars = max(floor, int(window * share)) * 4
         self.enabled = bool(config.get("stop_circling", True))
         self._buf: list[str] = []
         self._len = 0
@@ -798,8 +812,9 @@ def stream(
         # default spent its entire 300-token budget inside <think> and returned
         # an empty answer, which would cost a full generation and produce
         # nothing. With thinking off the same request took 4s instead of 10s and
-        # actually answered. Never set this for the agent's own turns, where the
-        # reasoning is the point.
+        # actually answered. Not for the agent's own turns, where the reasoning
+        # is the point — with one exception, the landing round (_conclude),
+        # which runs only after reasoning has already gone on too long.
         payload["chat_template_kwargs"] = {"enable_thinking": False}
     if tool_schemas:
         payload["tools"] = to_openai_tools(tool_schemas)

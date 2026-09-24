@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import pathlib
 import sys
 import time as _time
 
@@ -27,7 +28,8 @@ HELP = """\
   /models               pick and download a local model for this machine
   /config [k=v]         show or set configuration
   /compact              shrink the conversation now
-  /think [on|off]       show the last turn's reasoning, or toggle live display
+  /think [on|off|save]  show the last turn's reasoning, toggle live display,
+                        or save it to a file
   /diff [-n]            what changed this session (or since n changes ago)
   /undo                 revert the last file write or edit
   /checkpoints          list the snapshots taken after each accepted change
@@ -352,7 +354,7 @@ def _result_line(name: str, result: str) -> tuple[str, int]:
     if not lines:
         return "", 0
     if name == "Read" and not lines[0].startswith("Error"):
-        return f"Read {len(lines)} lines", 1     # the content is for the model
+        return f"Read {len(lines)} line{'s' * (len(lines) != 1)}", 1   # the content is for the model
     if name != "Bash":
         return lines[0], len(lines)
     tail = lines[-1]
@@ -385,6 +387,20 @@ def run_turn(state: loop.State, config: dict, tracker) -> None:
         status = console.status(f"[dim]{text}[/dim]", spinner="dots")
         status.start()
 
+    def end_thinking():
+        """Close a thinking block: one line of record where the counter was."""
+        nonlocal thinking
+        if not thinking:
+            return
+        thinking = False
+        stop_status()
+        if show_think:
+            console.print()
+            return
+        spent = _time.monotonic() - think_start
+        console.print(f"✻ thought for {spent:.0f}s · ~{think_bytes // 4:,} tokens",
+                      style="dim", highlight=False, markup=False)
+
     def on_approve(name, params):
         if name == "Bash":
             start_status(f"running {str(params.get('command', ''))[:60]} … "
@@ -405,12 +421,11 @@ def run_turn(state: loop.State, config: dict, tracker) -> None:
 
     try:
         for event in loop.run(state, config, asker, tracker):
-            stop_status()
             kind = type(event).__name__
+            if kind != "ThinkChunk":
+                end_thinking()
+                stop_status()
             if kind == "TextChunk":
-                if thinking:
-                    console.print()
-                    thinking = False
                 streaming = True
                 buffer.append(event.text)
                 console.print(event.text, end="", markup=False, highlight=False)
@@ -434,21 +449,24 @@ def run_turn(state: loop.State, config: dict, tracker) -> None:
                                   markup=False, highlight=False)
                 else:
                     # A static "thinking…" is indistinguishable from a hang, and
-                    # was twice diagnosed as one. The cap that used to punctuate
-                    # it is gone (§2.8), so a turn can deliberate for minutes
-                    # with nothing else on screen. Counting the chunks already
-                    # arriving costs nothing and works with any server.
+                    # was twice diagnosed as one, so it counts up. It runs on
+                    # the live status line: this used to print "\r" + text,
+                    # but Rich strips control characters from printed text, so
+                    # every update was *appended* — and past the terminal's
+                    # width, wrapped onto a new line twice a second.
                     now = _time.monotonic()
                     if now - last_tick >= 0.5:
                         last_tick = now
-                        console.print(
-                            f"\r[dim]thinking… ~{think_bytes // 4:,} tokens, "
-                            f"{now - think_start:.0f}s[/dim]  ",
-                            end="")
+                        line = (f"thinking… ~{think_bytes // 4:,} tokens, "
+                                f"{now - think_start:.0f}s")
+                        if status is None:
+                            start_status(line)
+                        else:
+                            status.update(f"[dim]{line}[/dim]")
             elif kind == "ToolStart":
-                if streaming or thinking:
+                if streaming:
                     console.print()
-                    streaming = thinking = False
+                    streaming = False
                 calls += 1
                 rounds = max(rounds, event.round)
                 console.print(Text.assemble(
@@ -498,22 +516,23 @@ def run_turn(state: loop.State, config: dict, tracker) -> None:
                               style="red" if failed else "dim",
                               markup=False, highlight=False)
             elif kind == "Compacting":
-                if streaming or thinking:
+                if streaming:
                     console.print()
-                    streaming = thinking = False
+                    streaming = False
                 # A model call: tens of seconds that would otherwise be silence.
                 start_status(f"compacting ~{event.tokens:,} tokens of history — "
                              f"the model is writing a note of what matters")
             elif kind == "Notice":
-                if streaming or thinking:
+                if streaming:
                     console.print()
-                    streaming = thinking = False
-                console.print(f"[yellow]{escape(event.text)}[/yellow]")
+                    streaming = False
+                console.print(f"[yellow]{escape(event.text)}[/yellow]", highlight=False)
             elif kind == "TurnDone":
-                if streaming or thinking:
+                if streaming:
                     console.print()
-                    streaming = thinking = False
+                    streaming = False
     except KeyboardInterrupt:
+        end_thinking()
         stop_status()
         console.print("\n[yellow]interrupted[/yellow]")
         # Keep history well-formed: a dangling assistant tool_call with no tool
@@ -526,12 +545,14 @@ def run_turn(state: loop.State, config: dict, tracker) -> None:
         console.print(f"[red]{type(e).__name__}: {escape(str(e))}[/red]")
         return
     finally:
+        end_thinking()
         stop_status()
 
     state.last_thinking = "".join(think_buf)
     if state.last_thinking and not show_think:
         n = len(state.last_thinking) // 4
-        console.print(f"[dim]  (~{n:,} tokens of reasoning — /think to view)[/dim]")
+        console.print(f"[dim]  (~{n:,} tokens of reasoning — /think to view)[/dim]",
+                      highlight=False)
 
     session.append(state.session_id, {"messages": state.messages})
 
@@ -548,7 +569,7 @@ def run_turn(state: loop.State, config: dict, tracker) -> None:
                 config['model'], state.system, config)
         if freed:
             console.print(f"[dim]compacted: reclaimed ~{freed:,} tokens in "
-                          f"{_time.monotonic() - t0:.0f}s[/dim]")
+                          f"{_time.monotonic() - t0:.0f}s[/dim]", highlight=False)
 
     # The footer: what the turn cost and what it changed. The last part is the
     # one that matters — the undo exists, and nothing used to say so.
@@ -561,9 +582,9 @@ def run_turn(state: loop.State, config: dict, tracker) -> None:
         parts.append(f"{len(changed)} file{'s' * (len(changed) != 1)} changed")
     if (ctx := _context_note(state, config)):
         parts.append(ctx)
-    console.print(f"[dim]✓ {' · '.join(parts)}[/dim]")
+    console.print(f"[dim]✓ {' · '.join(parts)}[/dim]", highlight=False)
     if changed:
-        console.print("[dim]  /diff to review · /rewind to undo[/dim]")
+        console.print("[dim]  /diff to review · /rewind to undo[/dim]", highlight=False)
 
 
 def show_unified(stat: str, text: str, title: str) -> None:
@@ -756,8 +777,24 @@ def handle_command(line: str, state: loop.State, config: dict, tracker) -> bool:
         if arg in ("on", "off"):
             cfg_mod.set_value(config, "show_thinking", arg)
             console.print(f"live reasoning display: [bold]{arg}[/bold]")
+        elif arg.startswith("save"):
+            # A runaway's reasoning is the one thing needed to tell a model
+            # that is working hard from one that is going round in circles,
+            # and the screen is the wrong place to study 10,000 tokens of it.
+            if not state.last_thinking:
+                console.print("No reasoning captured from the last turn.")
+                return True
+            target = (pathlib.Path(arg[4:].strip()).expanduser() if arg[4:].strip()
+                      else cfg_mod.HOME / "last_thinking.md")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(state.last_thinking, encoding="utf-8")
+            console.print(f"Saved ~{len(state.last_thinking) // 4:,} tokens of "
+                          f"reasoning to [bold]{escape(str(target))}[/bold]")
         elif state.last_thinking:
-            console.print(f"[dim]{state.last_thinking}[/dim]")
+            # markup=False: reasoning is full of brackets, and Rich would read
+            # "[a]" in it as a style tag and silently drop it.
+            console.print(state.last_thinking, style="dim", markup=False,
+                          highlight=False)
         else:
             console.print("No reasoning captured from the last turn. "
                           "(/think on streams it live.)")

@@ -476,7 +476,7 @@ def summarise_span(messages: list[dict], model: str, system: str, config: dict,
         # and this is the paraphrasing kind — the same thing that defeated it
         # on the agent's own turns.
         from .provider import TextChunk, ThinkChunk, _Deliberation
-        watch = _Deliberation(dict(config, think_share=0.06))
+        watch = _Deliberation(dict(config, think_share=0.06, think_floor=8192))
         parts: list[str] = []
         turn = None
         # One attempt. This is a mechanical call with a fallback right behind

@@ -296,9 +296,28 @@ def test_a_long_think_reports_progress_not_a_static_line(monkeypatch, capsys):
     m.run_turn(state, {"model": "local", "show_thinking": False}, None)
 
     out = capsys.readouterr().out
-    assert "thinking…" in out
-    assert "tokens" in out, "no progress counter during a long think"
+    # The live counter runs on a status line, which redraws in place on a
+    # terminal and leaves nothing in captured output; what must remain is the
+    # one-line record of the block, with the count accumulated across chunks.
+    assert "thought for" in out, "no record of the thinking block"
     assert "2,000 tokens" in out, f"counter did not accumulate: {out!r}"
+    assert out.count("thought for") == 1, "one block, one line"
+
+
+def test_the_landing_round_cannot_open_a_new_think_block(monkeypatch):
+    """Asked to stop deliberating with thinking still on, the model opened a
+    new <think> block and deliberated again — a runaway watched live."""
+    from miniharness import provider
+    seen = {}
+
+    def fake_stream(model, system, messages, schemas, config):
+        seen.update(config)
+        yield provider.AssistantTurn(text="acting now", finish_reason="stop")
+
+    monkeypatch.setattr(provider, "stream", fake_stream)
+    list(provider._conclude("local", "sys", [{"role": "user", "content": "go"}],
+                            "long reasoning", [], {"llama_ctx": 0}))
+    assert seen.get("disable_thinking") is True
 
 
 def test_the_progress_counter_stays_out_of_the_way_when_reasoning_is_shown(
