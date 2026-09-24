@@ -29,7 +29,7 @@ from pathlib import Path
 from . import net as requests
 
 from .config import HOME
-from .provider import TextChunk, stream
+from .provider import AssistantTurn, TextChunk, stream
 
 WORKSPACES = HOME / "research"
 
@@ -180,7 +180,10 @@ def run(question: str, config: dict, on_event=None, resume: bool = False):
         for event in stream(config["model"], SYSTEM, messages, SCHEMAS, config):
             if isinstance(event, TextChunk):
                 emit("text", event.text)
-            else:
+            elif isinstance(event, AssistantTurn):
+                # Only the turn itself. Reasoning and tool-draft progress also
+                # arrive here, and were saved as "the turn" until the real one
+                # overwrote them.
                 turn = event
         if turn is None:
             break

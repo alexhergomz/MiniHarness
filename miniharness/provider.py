@@ -130,6 +130,20 @@ class ThinkChunk:
     text: str
 
 
+@dataclass
+class ToolDraft:
+    """A tool call is being written: its name, and how much of it so far.
+
+    Writing a file means streaming its whole content as the call's arguments,
+    which produces no text and no reasoning — so the screen used to freeze on
+    the last "thinking…" for as long as that took. Watched: "thought for 55s ·
+    ~177 tokens", where the thinking was two seconds and the rest was a file
+    being written. Progress only; the finished call still arrives in the turn.
+    """
+    name: str
+    chars: int
+
+
 class ThinkFilter:
     """Split a token stream into visible text and <think> reasoning.
 
@@ -453,6 +467,9 @@ def _conclude(model, system, messages, reasoned, tool_schemas, config):
     landing = dict(config, disable_thinking=True)
     try:
         for event in stream(model, system, request, tool_schemas, landing):
+            if isinstance(event, ToolDraft):
+                yield event
+                continue
             if isinstance(event, (TextChunk, ThinkChunk)):
                 yield event
                 if isinstance(event, ThinkChunk):
@@ -658,6 +675,9 @@ def stream_complete(
         partial_think: list[str] = []
         try:
             for event in stream(model, system, request, tool_schemas, config):
+                if isinstance(event, ToolDraft):
+                    yield event
+                    continue
                 if isinstance(event, (TextChunk, ThinkChunk)):
                     yield event
                     if isinstance(event, ThinkChunk):
@@ -898,7 +918,11 @@ def stream(
                 if fn.get("name"):
                     slot["name"] = fn["name"]
                 if fn.get("arguments"):
+                    before = len(slot["args"])
                     slot["args"] += fn["arguments"]
+                    # Throttled: one event per ~400 characters written.
+                    if before == 0 or len(slot["args"]) // 400 > before // 400:
+                        yield ToolDraft(slot["name"], len(slot["args"]))
     except (requests.ConnectionError, requests.Timeout, requests.ChunkedEncodingError):
         # The connection dropped partway. Retrying is not safe — the user has
         # already seen whatever was streamed — so keep the partial turn and mark

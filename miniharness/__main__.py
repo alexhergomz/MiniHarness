@@ -486,7 +486,10 @@ def run_turn(state: loop.State, config: dict, tracker) -> None:
         if show_think:
             console.print()
             return
-        spent = _time.monotonic() - think_start
+        # To the last reasoning chunk, not to whatever event ended the block:
+        # a tool call streams its arguments silently, and that time is not
+        # thinking.
+        spent = think_last - think_start
         TRANSCRIPT.raw("\n── end of thinking ──\n")
         console.print(f"✻ thought for {spent:.0f}s · ~{think_bytes // 4:,} tokens",
                       style="dim", highlight=False, markup=False)
@@ -501,7 +504,7 @@ def run_turn(state: loop.State, config: dict, tracker) -> None:
     think_buf: list[str] = []
     streaming = False
     thinking = False
-    think_start = last_tick = 0.0
+    think_start = last_tick = think_last = 0.0
     think_bytes = 0
     show_think = bool(config.get("show_thinking"))
     turn_start = _time.monotonic()
@@ -514,7 +517,18 @@ def run_turn(state: loop.State, config: dict, tracker) -> None:
             kind = type(event).__name__
             if kind != "ThinkChunk":
                 end_thinking()
-                stop_status()
+                if kind != "ToolDraft":
+                    stop_status()
+            if kind == "ToolDraft":
+                # A tool call's content streaming in: a file being written, a
+                # long command. Nothing else arrives while it does.
+                what = {"Write": "writing", "Edit": "editing"}.get(event.name, "preparing")
+                line = f"{what} {event.name or 'a tool call'} … {event.chars:,} chars"
+                if status is None:
+                    start_status(line)
+                else:
+                    status.update(f"[dim]{line}[/dim]")
+                continue
             if kind == "TextChunk":
                 streaming = True
                 buffer.append(event.text)
@@ -534,6 +548,7 @@ def run_turn(state: loop.State, config: dict, tracker) -> None:
                     if show_think:
                         console.print("[dim]thinking…[/dim]", end="")
                 think_bytes += len(event.text)
+                think_last = _time.monotonic()
                 if show_think:
                     console.print(event.text, end="", style="dim",
                                   markup=False, highlight=False)

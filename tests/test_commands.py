@@ -518,3 +518,28 @@ def test_the_session_log_has_what_the_screen_showed_and_what_it_hid(
     assert "the divisor [n - 1] is wrong" in text, "hidden reasoning not logged"
     assert "Fixed it." in text and "thought for" in text and "✓" in text
     assert "\x1b" not in text, "colour codes in a plain-text log"
+
+
+def test_thinking_time_stops_when_the_reasoning_does(monkeypatch, capsys):
+    """"thought for 55s · ~177 tokens": two seconds of thinking, then a file
+    being written as a tool call, all counted as thought."""
+    from miniharness import __main__ as m
+    from miniharness import loop
+    from miniharness.provider import ThinkChunk, ToolDraft
+
+    now = [0.0]
+    monkeypatch.setattr(m._time, "monotonic", lambda: now[0])
+
+    def events(*a, **k):                 # the clock moves with the stream
+        now[0] = 0.0
+        yield ThinkChunk("a" * 400)
+        now[0] = 2.0
+        yield ThinkChunk("b" * 400)
+        now[0] = 55.0                    # 53 silent seconds writing the file
+        yield ToolDraft("Write", 4000)
+    monkeypatch.setattr(loop, "run", events)
+    m.run_turn(loop.State(messages=[{"role": "user", "content": "go"}]),
+               {"model": "local"}, None)
+    out = capsys.readouterr().out
+    assert "thought for 1s" in out or "thought for 2s" in out, out
+    assert "thought for 5" not in out

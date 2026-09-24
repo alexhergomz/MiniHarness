@@ -947,3 +947,24 @@ def test_circling_after_a_healthy_start_is_still_caught():
 
     d = _Deliberation({"llama_ctx": 65536})
     assert not any(d.feed(healthy[i:i + 300]) for i in range(0, len(healthy), 300))
+
+
+def test_a_tool_call_being_written_reports_progress_and_is_not_the_turn(monkeypatch):
+    """Streaming a file's content as a Write's arguments produced no events,
+    so the screen froze on "thinking…" for as long as the write took."""
+    from miniharness import provider
+    from miniharness.provider import ThinkChunk, ToolDraft
+
+    def fake(model, system, messages, schemas, config):
+        yield ThinkChunk("plan the file")
+        yield ToolDraft("Write", 400)
+        yield ToolDraft("Write", 800)
+        yield AssistantTurn(text="", finish_reason="tool_calls", tool_calls=[
+            {"id": "c1", "name": "Write", "input": {"file_path": "a.py", "content": "x"}}])
+
+    monkeypatch.setattr(provider, "stream", fake)
+    events = list(provider.stream_complete("local", "s", [], [], {}))
+    drafts = [e for e in events if isinstance(e, ToolDraft)]
+    turns = [e for e in events if isinstance(e, AssistantTurn)]
+    assert [d.chars for d in drafts] == [400, 800]
+    assert len(turns) == 1 and turns[0].tool_calls[0]["name"] == "Write"

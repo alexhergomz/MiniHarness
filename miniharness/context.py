@@ -487,6 +487,8 @@ def summarise_span(messages: list[dict], model: str, system: str, config: dict,
                          dict(config, reply_share=0.06, disable_thinking=True,
                               temperature=0.0, frequency_penalty=0.4,
                               max_retries=0)):
+            if type(ev).__name__ == "ToolDraft":
+                continue                     # the summariser has no tools anyway
             if isinstance(ev, (TextChunk, ThinkChunk)):
                 parts.append(ev.text)
                 if watch.feed(ev.text):

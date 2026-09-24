@@ -18,7 +18,7 @@ from typing import Any, Callable, Generator
 
 from . import checkpoint, tools
 from .provider import (AssistantTurn, Continuing, StoppedCircling, TextChunk, ThinkChunk,
-                       stream_complete)
+                       ToolDraft, stream_complete)
 
 # The stub that keeps user/assistant alternation intact after a truncation.
 TRUNCATION_STUB = "[output cut off at max_tokens]"
@@ -434,7 +434,7 @@ def run(
                              left if left <= max(3, max_turns // 5) else None,
                              state_ref=state)
         for event in stream_complete(config["model"], state.system, request, schemas, config):
-            if isinstance(event, (TextChunk, ThinkChunk)):
+            if isinstance(event, (TextChunk, ThinkChunk, ToolDraft)):
                 yield event
             elif isinstance(event, StoppedCircling):
                 yield Notice(f"stopped deliberating — {event.reason}")
