@@ -456,6 +456,35 @@ def _room_to_continue(messages: list[dict], system: str, written: str,
     return used <= _cfg.history_budget(config, tool_schemas)
 
 
+def _stop_hint(config: dict) -> str:
+    """Escalating hints for a model that keeps being stopped for circling.
+
+    The failure-streak hints (tools._struggle) count repeated *results*. A
+    live build showed a model that is stuck without producing any: it ran the
+    tests three times in thirty minutes and spent 87% of the run deliberating —
+    stopped for circling three times — so the same result never came back
+    three times and no hint ever fired. Being stopped is the stuck signal for
+    that model, and the landing round is where it is already being told to
+    change course. Same escalation, same rule: the strategy, never the answer.
+    """
+    n = int(config.get("_stops_this_turn", 0))
+    if n == 2:
+        return ("\n\nThis is the second time in this task your reasoning went "
+                "round in circles. Before acting, say in one line what the check "
+                "expects and what your code does instead — the gap between those "
+                "two is the bug.")
+    if n == 3:
+        return ("\n\nThis is the third time in this task your reasoning went "
+                "round in circles, so the approach is not converging. Look up how "
+                "this is normally done before editing again: WebSearch for the "
+                "concept (not your code), then WebFetch a page that explains it.")
+    if n >= 4:
+        return ("\n\nYour reasoning has gone round in circles four times in this "
+                "task. Stop trying variations: tell the user what you have tried, "
+                "what you think is wrong, and what you would need to know to fix it.")
+    return ""
+
+
 def _conclude(model, system, messages, reasoned, tool_schemas, config):
     """One final round: reasoning kept, deliberation ended.
 
@@ -480,7 +509,7 @@ def _conclude(model, system, messages, reasoned, tool_schemas, config):
                     + reasoned[-keep:]) if keep else ""
     request = messages + [
         {"role": "assistant", "content": reasoned},
-        {"role": "user", "content": CONCLUDE},
+        {"role": "user", "content": CONCLUDE + _stop_hint(config)},
     ] if reasoned.strip() else messages
     # The landing round is watched too.
     #
@@ -767,6 +796,8 @@ def stream_complete(
             # Not a truncation and not a penalty: every token of reasoning is
             # carried into the landing round, which asks for a decision rather
             # than for less thinking.
+            # Counted per turn, for the landing round's hints (_conclude).
+            config["_stops_this_turn"] = int(config.get("_stops_this_turn", 0)) + 1
             yield StoppedCircling(circling)
             reasoned = "".join(think_parts) + "".join(partial_think)
             landed = yield from _conclude(model, system, messages, reasoned,

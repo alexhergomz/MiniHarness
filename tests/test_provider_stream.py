@@ -1073,3 +1073,26 @@ def test_a_large_legitimate_write_is_not_stopped(monkeypatch):
     cfg = {"llama_host": "h", "llama_port": 1, "model": "local", "llama_ctx": 65536}
     turn = list(provider.stream("local", "", [{"role": "user", "content": "go"}], [], cfg))[-1]
     assert turn.tool_calls[0]["input"].get("content") == real
+
+
+def test_being_stopped_for_circling_again_brings_escalating_hints(monkeypatch):
+    """A model stuck without producing results — three test runs in thirty
+    minutes, 87% of the run deliberating — never repeated a result three
+    times, so the result-based hints never fired. Being stopped is its signal."""
+    from miniharness import provider
+    sent = []
+
+    def fake(model, system, messages, schemas, config):
+        sent.append(messages[-1]["content"])
+        yield provider.AssistantTurn(text="acting", finish_reason="stop")
+
+    monkeypatch.setattr(provider, "stream", fake)
+    cfg = {"llama_ctx": 0}
+    for n in range(1, 5):
+        cfg["_stops_this_turn"] = n
+        list(provider._conclude("local", "s", [{"role": "user", "content": "go"}],
+                                "long reasoning", [], cfg))
+    assert sent[0] == provider.CONCLUDE, "the first stop needs no hint"
+    assert "what the check expects" in sent[1]
+    assert "WebSearch" in sent[2]
+    assert "tell the user" in sent[3]

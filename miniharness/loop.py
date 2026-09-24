@@ -432,6 +432,7 @@ def run(
     schemas = tools.schemas_for(config)
     max_turns = int(config.get("max_turns", 100))
     tools.new_turn()
+    config["_stops_this_turn"] = 0
     stuck_told = False
     state.continuations = 0
     state.empty_retries = 0
@@ -464,6 +465,17 @@ def run(
                 yield event
             elif isinstance(event, StoppedCircling):
                 yield Notice(f"stopped deliberating — {event.reason}")
+                n = int(config.get("_stops_this_turn", 0))
+                if n in (2, 3):
+                    yield Notice("hint to the model: " + (
+                        "say what the check expects and what the code does instead"
+                        if n == 2 else "look up how this is normally done "
+                        "(WebSearch, then WebFetch)"))
+                if n >= 4 and not stuck_told:
+                    stuck_told = True
+                    yield Notice("the model looks stuck — its reasoning has gone "
+                                 "round in circles four times on this task. Ctrl-C "
+                                 "and give it a hint if you know what is wrong.")
             elif isinstance(event, Continuing):
                 # Reported while it happens, not after. A turn that has not
                 # ended is exactly the one whose cost is invisible.
