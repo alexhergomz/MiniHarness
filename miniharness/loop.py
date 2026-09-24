@@ -486,6 +486,7 @@ def run(
         msg = turn.to_message()
         state.messages.append(msg)
         valid = _strip_malformed(turn, msg)
+        _save(state, config)
 
         if hint := _handle_truncation(turn, msg, state, config):
             yield Notice("output truncated — continuing")
@@ -573,5 +574,15 @@ def run(
             # result is kept: working_set reads the first line for a command's
             # outcome and tests the "Error" prefix, and nothing else.
             state.ledger.append((tc["id"], name, params, result[:200]))
+            # Saved after every result, not at the end of the turn: a crash,
+            # a closed terminal or a sleeping laptop mid-turn used to lose
+            # everything since the user's last message.
+            _save(state, config)
 
+    _save(state, config)
     yield Notice(f"stopped after {max_turns} tool rounds")
+
+
+def _save(state: State, config: dict) -> None:
+    from . import session
+    session.save_point(state, config.get("_cwd", ""))

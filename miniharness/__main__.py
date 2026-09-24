@@ -122,7 +122,8 @@ HELP = """\
   /checkpoints          list the snapshots taken after each accepted change
   /rewind [-n|sha]      restore the working tree to a checkpoint
   /clear                start a fresh conversation (files are left as they are)
-  /resume [id]          resume a previous session (default: the most recent)
+  /resume [id]          resume a previous session (default: the latest here);
+                        a turn that was cut off carries on when you press Enter
   /log                  where this session's plain-text log is
   /research <question>  spawn a bounded research run; writes a markdown report
   /quit                 exit
@@ -424,6 +425,42 @@ def _repair_note(state: loop.State) -> str:
     return f", {n} interrupted tool call(s) repaired" if n else ""
 
 
+def resume_into(state: loop.State, sid: str, config: dict, tracker) -> bool:
+    """Load session `sid` into `state`. True if there was anything to load.
+
+    One function for /resume and --resume/--continue, which used to be two
+    copies of the same steps. The session is replayed from its log of changes
+    (session.restore), so a run cut off mid-turn comes back with every step it
+    had taken, not just the last finished turn.
+    """
+    saved = session.restore(sid)
+    if not saved["messages"]:
+        return False
+    state.messages = saved["messages"]
+    state.ledger = list(saved["ledger"])
+    state.session_id = sid
+    # What is on disk now, so the next save appends rather than re-snapshots.
+    state._saved = (len(state.messages), session._fingerprint(state.messages),
+                    len(state.ledger))
+    if TRANSCRIPT.path:
+        TRANSCRIPT.open(sid)
+    if tracker is not None:
+        # Restore what the session had already read; otherwise the first
+        # Edit after a resume is refused for a file already in context.
+        tracker._read = context.FileTracker.from_messages(
+            state.messages, config.get("_cwd"))._read
+    note = _repair_note(state)
+    console.print(f"Resumed [bold]{sid}[/bold] ({len(state.messages)} messages){note}")
+    if session.unfinished(state.messages):
+        steps = sum(1 for m in state.messages if m.get("role") == "tool")
+        console.print(f"[yellow]The last turn was cut off after {steps} tool "
+                      f"step{'s' * (steps != 1)}, before the model finished."
+                      f"[/yellow] [dim]Press Enter to let it carry on "
+                      "where it stopped, or type a new message.[/dim]")
+        config["_pending_continue"] = True
+    return True
+
+
 def _tool_detail(name: str, params: dict, config: dict) -> str:
     if (fp := params.get("file_path")):
         return _rel(str(fp), config)
@@ -691,7 +728,7 @@ def run_turn(state: loop.State, config: dict, tracker) -> bool:
         console.print(f"[dim]  (~{n:,} tokens of reasoning — /think to view)[/dim]",
                       highlight=False)
 
-    session.append(state.session_id, {"messages": state.messages})
+    session.save_point(state, config.get("_cwd", ""))
 
     # Compact if we're near the window. Never touches the head of the prompt.
     # Same budget the loop uses, so a turn cannot start already over it.
@@ -707,6 +744,7 @@ def run_turn(state: loop.State, config: dict, tracker) -> bool:
         if freed:
             console.print(f"[dim]compacted: reclaimed ~{freed:,} tokens in "
                           f"{_time.monotonic() - t0:.0f}s[/dim]", highlight=False)
+            session.save_point(state, config.get("_cwd", ""))
 
     # The footer: what the turn cost and what it changed. The last part is the
     # one that matters — the undo exists, and nothing used to say so.
@@ -1037,24 +1075,12 @@ def handle_command(line: str, state: loop.State, config: dict, tracker) -> bool:
         console.print(checkpoint.restore(config, state.session_id, target))
 
     elif cmd == "/resume":
-        sid = arg or session.latest()
+        sid = arg or session.latest_for(config["_cwd"]) or session.latest()
         if not sid:
             console.print("No sessions found.")
             return True
-        records = session.load(sid)
-        if not records:
-            console.print(f"[red]Nothing in session {sid}[/red]")
-            return True
-        state.messages = records[-1].get("messages", [])
-        state.session_id = sid
-        if TRANSCRIPT.path:
-            TRANSCRIPT.open(sid)
-        if tracker is not None:
-            fresh = context.FileTracker.from_messages(state.messages,
-                                                      config.get("_cwd"))
-            tracker._read = fresh._read
-        note = _repair_note(state)
-        console.print(f"Resumed [bold]{sid}[/bold] ({len(state.messages)} messages){note}")
+        if not resume_into(state, sid, config, tracker):
+            console.print(f"[red]Nothing in session {escape(sid)}[/red]")
 
     elif cmd == "/research":
         if not arg:
@@ -1110,6 +1136,8 @@ def main(argv=None) -> int:
     ap.add_argument("-C", "--cwd", default=os.getcwd(), help="working directory")
     ap.add_argument("--accept-all", action="store_true", help="never ask permission")
     ap.add_argument("--resume", nargs="?", const="", help="resume a session")
+    ap.add_argument("-c", "--continue", dest="cont", action="store_true",
+                    help="resume the most recent session in this directory")
     ap.add_argument("--no-repo-map", action="store_true", help="omit the repo map")
     args = ap.parse_args(argv)
     _install_exit_handlers()
@@ -1147,17 +1175,11 @@ def main(argv=None) -> int:
     state = loop.State(system=context.build_system(config))
     state.session_id = session.new_id(config["_cwd"])
 
-    if args.resume is not None:
-        sid = args.resume or session.latest()
-        if sid and (records := session.load(sid)):
-            state.messages = records[-1].get("messages", [])
-            state.session_id = sid
-            # Restore what the session had already read; otherwise the first
-            # Edit after a resume is refused for a file already in context.
-            tracker = context.FileTracker.from_messages(state.messages,
-                                                        config.get("_cwd"))
-            note = _repair_note(state)
-            console.print(f"[dim]resumed {sid} ({len(state.messages)} messages){note}[/dim]")
+    if args.resume is not None or args.cont:
+        sid = (args.resume or (session.latest_for(config["_cwd"]) if args.cont
+                               else session.latest()))
+        if not sid or not resume_into(state, sid, config, tracker):
+            console.print("[dim]No earlier session to resume here — starting fresh.[/dim]")
 
     if config.get("transcript", True):
         TRANSCRIPT.open(state.session_id)
@@ -1179,6 +1201,7 @@ def main(argv=None) -> int:
     if args.prompt:
         TRANSCRIPT.raw(f"\n[{_time.strftime('%H:%M:%S')}] > {args.prompt}\n")
         state.add_user(compose_message(args.prompt, config, tracker))
+        session.save_point(state, config["_cwd"])
         # A turn that died on an error exited 0, so a script — or a monitor —
         # read a crash as success. Watched: a run killed by a suspended
         # laptop reported "exit 0".
@@ -1205,6 +1228,13 @@ def main(argv=None) -> int:
             line = read_line().strip()
         except (EOFError, KeyboardInterrupt):
             break
+        if config.pop("_pending_continue", False) and not line:
+            # Carry on the turn that was cut off: the history already ends
+            # mid-task, so the model picks up from its last step.
+            TRANSCRIPT.raw(f"\n[{_time.strftime('%H:%M:%S')}] (continuing the "
+                           f"interrupted turn)\n")
+            run_turn(state, config, tracker)
+            continue
         if not line:
             continue
         # The prompt is drawn by prompt_toolkit, not by the console, so what
@@ -1219,6 +1249,7 @@ def main(argv=None) -> int:
                 run_shell(cmd, config)
             continue
         state.add_user(compose_message(line, config, tracker))
+        session.save_point(state, config["_cwd"])
         run_turn(state, config, tracker)
 
     TRANSCRIPT.close()

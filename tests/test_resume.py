@@ -162,3 +162,68 @@ def test_only_reads_count_not_other_tools(tmp_path):
     tracker = context.FileTracker.from_messages(messages, str(tmp_path))
     assert not tracker.has_read(str(tmp_path / "a.py")), \
         "a grep hit is not the same as having read the file"
+
+
+# ── Saving as it happens ────────────────────────────────────────────────────
+def test_every_step_is_on_disk_before_the_turn_ends():
+    """A session used to be written once per turn, so a crash or a sleeping
+    laptop mid-turn lost everything since the user's last message."""
+    from miniharness import session
+    st = loop.State(messages=[{"role": "user", "content": "go"}], session_id="inc")
+    session.save_point(st, "/w")
+    for i in range(3):
+        st.messages.append({"role": "assistant", "content": "", "tool_calls": [
+            {"id": f"c{i}", "type": "function", "function": {"name": "Bash", "arguments": "{}"}}]})
+        st.messages.append({"role": "tool", "tool_call_id": f"c{i}", "content": f"out{i}"})
+        st.ledger.append((f"c{i}", "Bash", {}, f"out{i}"))
+        session.save_point(st, "/w")
+        assert session.restore("inc")["messages"] == st.messages
+    recs = session.load("inc")
+    assert "meta" in recs[0] and recs[0]["meta"]["cwd"] == "/w"
+    assert sum("add" in r for r in recs) == 3, "appends should be written as appends"
+    assert len(session.restore("inc")["ledger"]) == 3
+
+
+def test_a_rewritten_history_is_saved_as_a_snapshot():
+    """Compaction replaces old messages. Appending after that would replay a
+    history that never existed."""
+    from miniharness import session
+    st = loop.State(messages=[{"role": "user", "content": f"m{i}"} for i in range(6)],
+                    session_id="snap")
+    session.save_point(st, "/w")
+    st.messages = [{"role": "user", "content": "Notes from the earlier part of this session:\n…"},
+                   {"role": "user", "content": "m5"}]
+    session.save_point(st, "/w")
+    assert session.restore("snap")["messages"] == st.messages
+    assert "messages" in session.load("snap")[-1]
+
+
+def test_old_session_files_still_load():
+    from miniharness import session
+    session.append("legacy", {"messages": [{"role": "user", "content": "a"}]})
+    session.append("legacy", {"messages": [{"role": "user", "content": "a"},
+                                           {"role": "assistant", "content": "b"}]})
+    assert [m["content"] for m in session.restore("legacy")["messages"]] == ["a", "b"]
+
+
+def test_an_interrupted_turn_is_recognised():
+    from miniharness import session
+    user = {"role": "user", "content": "go"}
+    call = {"role": "assistant", "content": "", "tool_calls": [{"id": "c1"}]}
+    result = {"role": "tool", "tool_call_id": "c1", "content": "x"}
+    done = {"role": "assistant", "content": "finished"}
+    assert session.unfinished([user])
+    assert session.unfinished([user, call])
+    assert session.unfinished([user, call, result])
+    assert not session.unfinished([user, call, result, done])
+    assert not session.unfinished([])
+
+
+def test_continue_picks_the_latest_session_in_this_directory():
+    from miniharness import session
+    for sid, cwd in (("a-1", "/proj/a"), ("b-1", "/proj/b")):
+        st = loop.State(messages=[{"role": "user", "content": sid}], session_id=sid)
+        session.save_point(st, cwd)
+    assert session.latest_for("/proj/a") == "a-1"
+    assert session.latest_for("/proj/b") == "b-1"
+    assert session.latest_for("/proj/c") is None

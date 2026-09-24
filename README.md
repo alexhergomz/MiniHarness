@@ -63,6 +63,13 @@ counter, and it is flushed line by line: `tail -f` it from another terminal to
 follow a run, or read it afterwards to see why a turn went the way it did.
 `/config transcript=false` turns it off.
 
+**Nothing is lost to a crash.** The session is saved after every step, not
+at the end of a turn, so a closed terminal, a crash or a laptop going to sleep
+mid-turn keeps everything the model had done. `miniharness --continue` (or
+`-c`) reopens the latest session in the current directory; `/resume` does the
+same from inside. If the last turn was cut off, press Enter and it carries on
+from its last step.
+
 **What a turn looks like.** Each tool call is one line; a change is shown as a
 line-numbered diff with the edited words marked, whether or not anything asked
 first. A command's line is its verdict (`4 passed in 0.12s`), not its progress
