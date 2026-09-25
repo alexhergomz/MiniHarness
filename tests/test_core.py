@@ -2398,3 +2398,19 @@ def test_rewriting_a_file_with_the_same_content_says_nothing_changed(tmp_path):
     out = tools.dispatch("Write", {"file_path": "v.py", "content": "x = 2\n"},
                          {"_cwd": str(tmp_path)}, tr)
     assert out.startswith("Updated v.py")
+
+
+def test_the_same_result_at_a_different_speed_is_the_same_result(tmp_path):
+    """"1 failed in 0.11s" and "in 0.12s" never matched, so identical runs
+    whose exit code was hidden by a pipe could not build a streak."""
+    from miniharness import tools
+    cfg = {"_cwd": str(tmp_path)}
+    (tmp_path / "v.py").write_text("x = 0\n")
+    tools.new_turn()
+    outs = []
+    for i, t in enumerate(("0.11", "0.12", "0.10")):
+        tools.dispatch("Write", {"file_path": "v.py", "content": f"x = {i + 1}\n", "append": True},
+                       cfg, None)
+        cmd = f"python3 -c \"print('=== 1 failed in {t}s ===')\""
+        outs.append(tools.dispatch("Bash", {"command": cmd}, cfg, None))
+    assert "[hint:" in outs[2], outs[2]

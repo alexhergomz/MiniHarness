@@ -1103,6 +1103,16 @@ def struggle_level() -> int:
     return int(_FAIL_STREAK["told"])
 
 
+_TIMING = re.compile(r"\b(?:in )?\d+(?:\.\d+)?\s?(?:ms|s|sec|seconds)\b|=+")
+
+
+def _without_timings(text: str) -> str:
+    """The same result, run twice, differs in how long it took. Watched: "1
+    failed in 0.11s" then "in 0.12s" — identical runs that never matched, so
+    the stuck-detection could not fire on them."""
+    return re.sub(r"\s+", " ", _TIMING.sub("", text)).strip()
+
+
 def _failure_signature(out: str) -> str:
     # The verdict is at the end of a run; look at the last lines, and only at
     # the last 400 characters of each, so the cost is flat however long the
@@ -1121,8 +1131,8 @@ def _failure_signature(out: str) -> str:
             counts = f"{m.group('failed') or 0} failed, {m.group('passed') or 0} passed · "
     for line in reversed(lines):
         if (m := _FAIL_LINE.search(line)):
-            return (counts + m.group(1))[:240]
-    return (counts + lines[-1])[:240] if lines else ""
+            return _without_timings(counts + m.group(1))[:240]
+    return _without_timings(counts + lines[-1])[:240] if lines else ""
 
 
 def _struggle(out: str, returncode: int) -> str:
@@ -1151,7 +1161,7 @@ def _struggle(out: str, returncode: int) -> str:
         # edit in between, an unchanged result means nothing (`ls` twice).
         tail = [l.strip() for l in out.splitlines()
                 if l.strip() and not l.startswith("[exit")][-3:]
-        sig = " / ".join(tail)[:200]
+        sig = _without_timings(" / ".join(tail))[:200]
         if not sig or not edited or sig != _FAIL_STREAK["sig"]:
             _FAIL_STREAK.update(sig=sig, count=1 if edited else 0)
             return ""
