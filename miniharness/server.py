@@ -134,6 +134,43 @@ _SAMPLING_FLAGS = {"temp": "--temp", "top_p": "--top-p", "top_k": "--top-k",
                    "presence_penalty": "--presence-penalty"}
 
 
+def exact_counter(config: dict):
+    """(count, per_message) using the server's own tokenizer, or None.
+
+    `count(text)` is exact: /tokenize runs the model's tokenizer. The chat
+    template's markup around each message is measured once, by rendering three
+    short messages with /apply-template and subtracting their content — not
+    assumed, since it differs between templates.
+    """
+    try:
+        base = base_url(config)
+    except Exception:
+        return None
+
+    def count(text: str) -> int:
+        r = requests.post(f"{base}/tokenize", json={"content": text, "add_special": False},
+                          timeout=30)
+        return len(r.json()["tokens"])
+
+    try:
+        if count("hello world") <= 0:
+            return None
+    except Exception:
+        return None
+    per = 5
+    try:
+        sample = [{"role": "user", "content": "alpha"},
+                  {"role": "assistant", "content": "beta"},
+                  {"role": "user", "content": "gamma"}]
+        r = requests.post(f"{base}/apply-template", json={"messages": sample}, timeout=30)
+        prompt = r.json()["prompt"]
+        per = max(1, round((count(prompt) - sum(count(m["content"]) for m in sample))
+                           / len(sample)))
+    except Exception:
+        pass
+    return count, per
+
+
 def sampling_args(model_path: str) -> list[str]:
     """llama-server flags for the model card's sampling. Empty if unknown."""
     from .models import spec_for_path

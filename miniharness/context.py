@@ -20,6 +20,7 @@ different prefix every time it ran.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -303,7 +304,64 @@ def raw_chars(messages: list[dict], system: str = "") -> int:
     return n
 
 
+# ── Counting tokens exactly ─────────────────────────────────────────────────
+# When the server can tokenize, nothing is estimated: each piece of text is
+# counted once with the model's own tokenizer and remembered, so after the first
+# request a conversation's size costs a dictionary lookup per message. The
+# character estimate below survives only for servers that cannot count.
+_TOKENIZER = None                      # callable(str) -> int, or None
+_TOKEN_CACHE: dict[str, int] = {}
+_TOKEN_CACHE_MAX = 20000
+_PER_MESSAGE = 5                       # template markup per message; measured when counting
+
+
+def use_tokenizer(count, per_message: int | None = None) -> None:
+    """Count with `count(text) -> tokens` from now on. None goes back to estimating."""
+    global _TOKENIZER, _PER_MESSAGE
+    _TOKENIZER = count
+    _TOKEN_CACHE.clear()
+    if per_message is not None:
+        _PER_MESSAGE = per_message
+
+
+def _count(text: str) -> int:
+    if not text:
+        return 0
+    key = hashlib.sha1(text.encode("utf-8", "replace")).hexdigest()
+    if (hit := _TOKEN_CACHE.get(key)) is not None:
+        return hit
+    try:
+        n = int(_TOKENIZER(text))
+    except Exception:
+        return int(len(text) / 4 * _calibration)     # server gone: estimate, uncached
+    if len(_TOKEN_CACHE) >= _TOKEN_CACHE_MAX:
+        _TOKEN_CACHE.clear()
+    _TOKEN_CACHE[key] = n
+    return n
+
+
 def estimate_tokens(messages: list[dict], system: str = "") -> int:
+    """Tokens this history will take — counted exactly when the server can.
+
+    Reasoning counts only where the template renders it: from the last user
+    message on (see raw_chars). Everything else follows the same rules as the
+    estimate, so the two are interchangeable to every caller.
+    """
+    if _TOKENIZER is None:
+        return _estimate_tokens(messages, system)
+    n = _count(system)
+    last_user = max((i for i, m in enumerate(messages)
+                     if m.get("role") == "user"), default=-1)
+    for i, m in enumerate(messages):
+        n += _PER_MESSAGE + _count(str(m.get("content") or ""))
+        for tc in m.get("tool_calls") or []:
+            n += _count(str(tc.get("function", {}).get("arguments", "")))
+        if i > last_user:
+            n += _count(str(m.get("reasoning_content") or ""))
+    return n
+
+
+def _estimate_tokens(messages: list[dict], system: str = "") -> int:
     """Estimated tokens, corrected by what the server has actually reported.
 
     "4 chars ~= 1 token" is close for prose and code and badly wrong for the

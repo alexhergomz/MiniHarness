@@ -51,6 +51,17 @@ def _isolated_home(tmp_path_factory, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_server_tokenizer(monkeypatch):
+    """Tests count with the estimate unless they set a tokenizer themselves —
+    never with a real server that happens to be running on the machine."""
+    from miniharness import server
+    monkeypatch.setattr(server, "exact_counter", lambda config: None)
+    context.use_tokenizer(None)
+    yield
+    context.use_tokenizer(None)
+
+
+@pytest.fixture(autouse=True)
 def _no_checkpoints(monkeypatch, request):
     """Checkpoints run `git add -A` over the agent's working directory.
 

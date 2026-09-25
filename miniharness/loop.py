@@ -432,6 +432,7 @@ def run(
     schemas = tools.schemas_for(config)
     max_turns = int(config.get("max_turns", 100))
     tools.new_turn()
+    _count_exactly(config)
     config["_stops_this_turn"] = 0
     stuck_told = False
     alt_from: tuple[str, str] | None = None     # (test command, its last output)
@@ -605,6 +606,26 @@ def run(
 
     _save(state, config)
     yield Notice(f"stopped after {max_turns} tool rounds")
+
+
+def _count_exactly(config: dict) -> None:
+    """Use the server's tokenizer for every size check, if it has one.
+
+    Once per run of the loop. The budget used to rest on a character estimate
+    corrected by a calibration factor — which compounded to four times the real
+    size and made the harness compact at a quarter of its budget. Counting is
+    what the server is for; the estimate stays only for servers that cannot.
+    """
+    if config.get("_counter_checked"):
+        return
+    config["_counter_checked"] = True
+    from .provider import split_model
+    if split_model(config.get("model", ""))[0] != "local":
+        return
+    from . import server
+    from . import context as _ctx
+    if (counter := server.exact_counter(config)):
+        _ctx.use_tokenizer(*counter)
 
 
 def _save(state: State, config: dict) -> None:

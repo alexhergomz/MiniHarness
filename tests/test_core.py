@@ -2431,3 +2431,35 @@ def test_calibration_settles_on_the_true_ratio_instead_of_compounding():
         assert abs(context._calibration - 1.05) < 0.01, context._calibration
     finally:
         context._calibration = 1.0
+
+
+def test_tokens_are_counted_exactly_and_each_text_only_once():
+    """The budget used to rest on a character estimate times a calibration
+    factor, which compounded to 4x. With a tokenizer, nothing is estimated."""
+    from miniharness import context
+    calls = []
+
+    def words(text):
+        calls.append(text)
+        return len(text.split())
+
+    context.use_tokenizer(words, per_message=3)
+    try:
+        msgs = [{"role": "user", "content": "build the thing"},
+                {"role": "assistant", "content": "ok", "reasoning_content": "think think",
+                 "tool_calls": [{"function": {"arguments": "a b"}}]},
+                {"role": "tool", "content": "one two three"}]
+        # 3 + 3 + (3+1+2 args+2 reasoning) + (3+3) = 20
+        assert context.estimate_tokens(msgs) == 20
+        n_calls = len(calls)
+        assert context.estimate_tokens(msgs) == 20 and len(calls) == n_calls, "recounted"
+        # Reasoning before the last user message is not rendered, so not counted.
+        later = msgs + [{"role": "user", "content": "next"}]
+        assert context.estimate_tokens(later) == 20 - 2 + 3 + 1
+
+        def gone(text):
+            raise ConnectionError("server stopped")
+        context.use_tokenizer(gone, per_message=3)
+        assert context.estimate_tokens([{"role": "user", "content": "x" * 400}]) >= 100
+    finally:
+        context.use_tokenizer(None)
