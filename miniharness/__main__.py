@@ -474,7 +474,7 @@ def _tool_detail(name: str, params: dict, config: dict) -> str:
 # never saw any of them. Watched on a live run: the monitor could not tell
 # whether a hint had fired.
 _NOTE_PREFIXES = ("[hint:", "[the suite got worse", "[the suite is green",
-                  "[you have read this file", "[this is ")
+                  "[you have read this file", "[this is ", "[this leaves a syntax error")
 
 
 def _show_notes(result: str) -> None:

@@ -2367,3 +2367,18 @@ def test_fixing_other_tests_is_progress_not_the_same_failure(tmp_path):
             "print('1 failed, 13 passed in 0.1s'); raise SystemExit(1)\"")
     outs = [tools.dispatch("Bash", {"command": same}, cfg, None) for _ in range(3)]
     assert "[hint:" in outs[2]
+
+
+def test_a_write_that_breaks_python_says_so_at_once(tmp_path):
+    """A syntax error used to surface only when the next test run failed at
+    collection — a whole cycle to find a typo the harness could name."""
+    from miniharness import tools, context
+    cfg = {"_cwd": str(tmp_path)}
+    tr = context.FileTracker()
+    out = tools.dispatch("Write", {"file_path": "v.py",
+                                   "content": "def f(:\n    return 1\n"}, cfg, tr)
+    assert "syntax error at line 1" in out and (tmp_path / "v.py").exists()
+    out = tools.dispatch("Write", {"file_path": "w.py", "content": "x = 1\n"}, cfg, tr)
+    assert "syntax error" not in out
+    out = tools.dispatch("Write", {"file_path": "notes.md", "content": "def f(:\n"}, cfg, tr)
+    assert "syntax error" not in out, "only Python files are checked"

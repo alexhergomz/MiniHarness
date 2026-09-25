@@ -1009,6 +1009,32 @@ _SUITE_RE = re.compile(
     r"(?:, )?(?:(?P<error>\d+) error)?[^\n]*\bin [\d.]+s")
 
 
+def _syntax_note(path: str, cfg: dict) -> str:
+    """Say straight away when a write leaves a Python file that cannot parse.
+
+    Watched across several live builds: a syntax or import error went unseen
+    until the next test run, which then failed at collection and cost a whole
+    cycle to find a typo the harness could have named on the spot. SWE-agent
+    measured the same thing — checking an edit where it is made helps a model
+    more than letting the test suite discover it. The write still happens;
+    this only reports what the file now is.
+    """
+    if not path.endswith(".py"):
+        return ""
+    f = _resolve(path, cfg)
+    try:
+        source = f.read_text(encoding="utf-8", errors="replace")
+        compile(source, str(f), "exec")
+    except SyntaxError as e:
+        line = (e.text or "").rstrip()
+        where = f"line {e.lineno}" + (f": `{line.strip()[:120]}`" if line.strip() else "")
+        return (f"\n[this leaves a syntax error at {where} — {e.msg}. The file was "
+                f"written as given; fix this before running anything]")
+    except (OSError, ValueError):
+        return ""
+    return ""
+
+
 def _test_regression(out: str, cfg: dict) -> str:
     """Say when a test run came back worse than the one before it.
 
@@ -1563,6 +1589,8 @@ def dispatch(name: str, params: dict, config: dict, tracker=None,
         return f"Error: {name} missing required parameter {e}"
     except Exception as e:  # a crashing tool must not kill the loop
         return f"Error: {name} failed: {type(e).__name__}: {e}"
+    if name in ("Write", "Edit") and not out.startswith("Error"):
+        out += _syntax_note(str(params.get("file_path", "")), config)
     page = _paginate(name, out, config, continue_from)
     if name == "Read" and not page.startswith("Error") and params.get("file_path"):
         page += _reread_streak(str(_resolve(str(params["file_path"]), config)))
