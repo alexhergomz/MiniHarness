@@ -434,6 +434,7 @@ def run(
     tools.new_turn()
     config["_stops_this_turn"] = 0
     stuck_told = False
+    alt_from: tuple[str, str] | None = None     # (test command, its last output)
     state.continuations = 0
     state.empty_retries = 0
 
@@ -565,6 +566,8 @@ def run(
                 # where a sentence of human knowledge is worth more than more
                 # attempts.
                 stuck_told = True
+                if name == "Bash":
+                    alt_from = (params.get("command", ""), result)
                 yield Notice(f"the model looks stuck — the same failure keeps "
                              f"coming back: {tools._FAIL_STREAK['sig']}. "
                              f"Ctrl-C and give it a hint if you know what is wrong.")
@@ -589,6 +592,15 @@ def run(
             # Saved after every result, not at the end of the turn: a crash,
             # a closed terminal or a sleeping laptop mid-turn used to lose
             # everything since the user's last message.
+            _save(state, config)
+
+        if alt_from:
+            # Once every result of this round is in, so the history stays
+            # well-formed: try several fixes and keep the one the tests prefer.
+            from . import alternatives
+            cmd, out = alt_from
+            alt_from = None
+            yield from alternatives.run(state, config, tracker, cmd, out, schemas)
             _save(state, config)
 
     _save(state, config)

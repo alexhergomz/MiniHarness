@@ -159,6 +159,9 @@ DEFAULTS: dict[str, Any] = {
     # 81,920 for competition-grade problems). Circling is caught long before
     # this by the repetition check; this only ends reasoning that never lands.
     "think_limit": 32768,
+    # When the same failure keeps coming back, ask for this many fixes and keep
+    # the one the failing tests like best (alternatives.py). 0 turns it off.
+    "best_of": 3,
 
     # ── Context ─────────────────────────────────────────────────────────────
     # ── Everything below is a SHARE of the context window ───────────────────

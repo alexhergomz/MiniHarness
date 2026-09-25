@@ -1005,3 +1005,85 @@ def test_a_refusal_can_say_what_to_do_instead(tmp_path, monkeypatch):
     ends = [e for e in events if type(e).__name__ == "ToolEnd"]
     assert ends[0].denied
     assert "use make clean instead" in state.messages[2]["content"]
+
+
+@pytest.mark.checkpoints
+def test_when_stuck_several_fixes_are_tried_and_the_best_is_kept(tmp_path, monkeypatch):
+    """Watched: a model that stated its bug exactly and still moved between 13
+    and 15 of 18 for half an hour. The failing test is a free judge; checkpoints
+    make trying and undoing safe."""
+    from miniharness import checkpoint
+    if not checkpoint.available():
+        pytest.skip("no git")
+    monkeypatch.setattr(checkpoint, "STORE", tmp_path / "store")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "v.py").write_text("ANSWER = 1\n")
+    test = ("python3 -c \"import v; print('1 failed, 0 passed in 0.1s' if v.ANSWER != 42 "
+            "else '1 passed in 0.1s'); raise SystemExit(v.ANSWER != 42)\"")
+    cfg = dict(BASE, _cwd=str(work), max_turns=30, best_of=3)
+    tracker = context.FileTracker()
+    tracker.mark_read(str(work / "v.py"))
+
+    runs = iter(range(100))
+    def fake(model, system, messages, schemas, config):
+        last = messages[-1]
+        if "asking for your fix from here more than once" in str(last.get("content", "")):
+            k = next(runs)
+            answers = {0: "ANSWER = 7\n", 1: "ANSWER = 42\n"}
+            if k % 3 in answers:
+                yield AssistantTurn(text="", finish_reason="tool_calls", tool_calls=[
+                    {"id": f"a{k}", "name": "Write",
+                     "input": {"file_path": "v.py", "content": answers[k % 3]}}])
+            else:
+                yield AssistantTurn(text="thinking it over", finish_reason="stop")
+            return
+        if sum(1 for m in messages if m.get("role") == "tool") < 7:
+            yield AssistantTurn(text="", finish_reason="tool_calls", tool_calls=[
+                {"id": f"t{len(messages)}", "name": "Bash", "input": {"command": test}}])
+        else:
+            yield AssistantTurn(text="done", finish_reason="stop")
+
+    state = loop.State(messages=[{"role": "user", "content": "make the test pass"}],
+                       session_id="alt-test")
+    events = drain(state, cfg, monkeypatch, fake, tracker=tracker)
+    notices = [e.text for e in events if type(e).__name__ == "Notice"]
+
+    assert (work / "v.py").read_text() == "ANSWER = 42\n", "the best fix was not kept"
+    assert any(n.startswith("trying 3 alternative fixes") for n in notices), notices
+    assert any("kept alternative 2" in n for n in notices), notices
+    assert any("kept #2: 1 failed, 0 passed → 0 failed, 1 passed" in str(m.get("content"))
+               for m in state.messages if m["role"] == "tool")
+    assert_history_valid(state.messages)
+
+
+@pytest.mark.checkpoints
+def test_when_no_alternative_is_better_nothing_is_changed(tmp_path, monkeypatch):
+    from miniharness import checkpoint
+    if not checkpoint.available():
+        pytest.skip("no git")
+    monkeypatch.setattr(checkpoint, "STORE", tmp_path / "store")
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "v.py").write_text("ANSWER = 1\n")
+    test = ("python3 -c \"import v; print('1 failed, 0 passed in 0.1s' if v.ANSWER != 42 "
+            "else '1 passed in 0.1s'); raise SystemExit(v.ANSWER != 42)\"")
+    cfg = dict(BASE, _cwd=str(work), max_turns=30, best_of=2)
+    tracker = context.FileTracker()
+    tracker.mark_read(str(work / "v.py"))
+
+    def fake(model, system, messages, schemas, config):
+        if "asking for your fix from here more than once" in str(messages[-1].get("content", "")):
+            yield AssistantTurn(text="", finish_reason="tool_calls", tool_calls=[
+                {"id": "w", "name": "Write", "input": {"file_path": "v.py", "content": "ANSWER = 3\n"}}])
+        elif sum(1 for m in messages if m.get("role") == "tool") < 7:
+            yield AssistantTurn(text="", finish_reason="tool_calls", tool_calls=[
+                {"id": f"t{len(messages)}", "name": "Bash", "input": {"command": test}}])
+        else:
+            yield AssistantTurn(text="done", finish_reason="stop")
+
+    state = loop.State(messages=[{"role": "user", "content": "go"}], session_id="alt-none")
+    drain(state, cfg, monkeypatch, fake, tracker=tracker)
+    assert (work / "v.py").read_text() == "ANSWER = 1\n", "a worse fix was left in place"
+    assert any("nothing was changed" in str(m.get("content")) for m in state.messages)
+    assert_history_valid(state.messages)
