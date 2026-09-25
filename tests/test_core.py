@@ -2382,3 +2382,19 @@ def test_a_write_that_breaks_python_says_so_at_once(tmp_path):
     assert "syntax error" not in out
     out = tools.dispatch("Write", {"file_path": "notes.md", "content": "def f(:\n"}, cfg, tr)
     assert "syntax error" not in out, "only Python files are checked"
+
+
+def test_rewriting_a_file_with_the_same_content_says_nothing_changed(tmp_path):
+    """22 of 28 calls on a live run were identical rewrites, each told
+    "Updated" — to the model every one looked like it had done something."""
+    from miniharness import tools, context
+    f = tmp_path / "v.py"
+    f.write_text("x = 1\n")
+    tr = context.FileTracker()
+    tr.mark_read(str(f))
+    out = tools.dispatch("Write", {"file_path": "v.py", "content": "x = 1\n"},
+                         {"_cwd": str(tmp_path)}, tr)
+    assert out.startswith("No change: v.py already contains exactly this")
+    out = tools.dispatch("Write", {"file_path": "v.py", "content": "x = 2\n"},
+                         {"_cwd": str(tmp_path)}, tr)
+    assert out.startswith("Updated v.py")

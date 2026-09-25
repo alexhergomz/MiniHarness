@@ -652,10 +652,11 @@ def _write(p: dict, cfg: dict, tracker) -> str:
         f.parent.mkdir(parents=True, exist_ok=True)
         existed = f.exists()
         before = 0
+        prior = None
         if existed:
             try:
-                before = len(f.read_text(encoding="utf-8",
-                                         errors="replace").splitlines())
+                prior = f.read_text(encoding="utf-8", errors="replace")
+                before = len(prior.splitlines())
             except OSError:
                 before = 0
         _push_undo(f)
@@ -671,6 +672,14 @@ def _write(p: dict, cfg: dict, tracker) -> str:
         tracker.mark_read(str(f))
     n = len(content.splitlines())
     note = _rewrite_streak(str(f), cfg)
+    if not append and prior is not None and prior == content:
+        # Watched on a live run: 22 of 28 calls rewrote a file with exactly
+        # the content it already had, and every one was told "Updated". The
+        # harness knew the bytes were identical and said something else, so
+        # to the model each write looked like it had done something.
+        return (f"No change: {path} already contains exactly this ({n} lines), "
+                f"so writing it again did nothing. To make progress, change "
+                f"something, or run the tests to see where things stand." + note)
     if append and existed:
         return f"Appended {n} lines to {path}"
     if not existed:
