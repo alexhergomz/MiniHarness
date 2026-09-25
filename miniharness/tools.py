@@ -1074,10 +1074,20 @@ def _failure_signature(out: str) -> str:
     # output is.
     lines = [l.strip()[-400:] for l in out[-40000:].splitlines()
              if l.strip() and not l.startswith("[exit")][-60:]
+    # A test run's pass/fail counts are part of the signature. The failing
+    # line alone reads the same while the model fixes other tests one by one
+    # — the last test in the file keeps failing — and on a live run that
+    # said "not converging" to a model that had just gone from 10 passing to
+    # 13. Fixing a test is progress, and progress starts the count over.
+    tail = "\n".join(l for l in lines if len(l) <= 500)
+    counts = ""
+    for m in _SUITE_RE.finditer(tail):
+        if m.group("passed") or m.group("failed"):
+            counts = f"{m.group('failed') or 0} failed, {m.group('passed') or 0} passed · "
     for line in reversed(lines):
         if (m := _FAIL_LINE.search(line)):
-            return m.group(1)[:200]
-    return lines[-1][:200] if lines else ""
+            return (counts + m.group(1))[:240]
+    return (counts + lines[-1])[:240] if lines else ""
 
 
 def _struggle(out: str, returncode: int) -> str:

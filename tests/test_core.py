@@ -2347,3 +2347,23 @@ def test_a_9b_on_a_6gb_card_gets_usable_weights_not_2_bits():
     best = models.recommend_for_model(6.05, spec, quants)[0]
     assert best.quant.label == "Q3_K_M", best.quant.label
     assert best.ctx_k >= models.WORK_CTX_K
+
+
+def test_fixing_other_tests_is_progress_not_the_same_failure(tmp_path):
+    """The last test in a file can keep failing while the model fixes the
+    others. On a live run the harness called 10 -> 13 passing "not converging"."""
+    from miniharness import tools
+    cfg = {"_cwd": str(tmp_path)}
+    tools.new_turn()
+    outs = []
+    for passed in (10, 11, 12, 13, 14):
+        cmd = (f"python3 -c \"print('FAILED tests/t.py::test_reference_check - AssertionError'); "
+               f"print('1 failed, {passed} passed in 0.1s'); raise SystemExit(1)\"")
+        outs.append(tools.dispatch("Bash", {"command": cmd}, cfg, None))
+    assert not any("[hint:" in o for o in outs), "progress was called being stuck"
+
+    tools.new_turn()                      # the same counts and line: stuck
+    same = ("python3 -c \"print('FAILED tests/t.py::test_reference_check - AssertionError'); "
+            "print('1 failed, 13 passed in 0.1s'); raise SystemExit(1)\"")
+    outs = [tools.dispatch("Bash", {"command": same}, cfg, None) for _ in range(3)]
+    assert "[hint:" in outs[2]
