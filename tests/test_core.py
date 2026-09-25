@@ -2414,3 +2414,20 @@ def test_the_same_result_at_a_different_speed_is_the_same_result(tmp_path):
         cmd = f"python3 -c \"print('=== 1 failed in {t}s ===')\""
         outs.append(tools.dispatch("Bash", {"command": cmd}, cfg, None))
     assert "[hint:" in outs[2], outs[2]
+
+
+def test_calibration_settles_on_the_true_ratio_instead_of_compounding():
+    """The ratio was multiplied into the previous correction, so a steady true
+    ratio of 1.26 reached the 4.0 clamp in six requests — every budget cut to a
+    quarter, twelve compactions in 56 minutes of a 64k window."""
+    from miniharness import context
+    context._calibration = 1.0
+    try:
+        for _ in range(20):
+            context.calibrate(12_600, 10_000)
+        assert abs(context._calibration - 1.26) < 0.01, context._calibration
+        for _ in range(200):                          # the estimate got better
+            context.calibrate(10_500, 10_000)
+        assert abs(context._calibration - 1.05) < 0.01, context._calibration
+    finally:
+        context._calibration = 1.0

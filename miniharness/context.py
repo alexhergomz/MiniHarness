@@ -339,8 +339,17 @@ def calibrate(actual_prompt_tokens: int, estimated: int) -> float:
     # Below this the chat template's fixed markup dominates and the ratio says
     # more about overhead than about how the content tokenises.
     if actual_prompt_tokens > 0 and estimated > 1500:
+        # `estimated` is the raw character count, before any correction, so
+        # this ratio *is* the correction — not a factor to apply on top of the
+        # last one. It used to be multiplied in (`_calibration * ratio`), which
+        # compounds: a steady true ratio of 1.26 went 1.26, 1.59, 2.0, 2.5, 3.2
+        # and reached the 4.0 clamp by the sixth request. Every session since
+        # then thought its history was four times its size and compacted at a
+        # quarter of the budget — watched: twelve compactions in 56 minutes on
+        # a 64k window whose prompts never passed 19.7k tokens, and a model
+        # re-reading what each compaction had just thrown away.
         ratio = actual_prompt_tokens / estimated
-        _calibration = min(4.0, max(1.0, _calibration * 0.97, _calibration * ratio))
+        _calibration = min(4.0, max(1.0, ratio, _calibration * 0.97))
     return _calibration
 
 
